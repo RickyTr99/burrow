@@ -55,6 +55,7 @@ enum {
     NR_bind = 200, NR_connect = 203, NR_sendto = 206, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
     NR_clone3 = 435, NR_faccessat2 = 439, NR_fchmodat2 = 452, NR_process_vm_readv = 270,
+    NR_shmget = 194, NR_shmctl = 195, NR_shmat = 196, NR_shmdt = 197,
 };
 
 enum {
@@ -232,6 +233,9 @@ long host_to_guest(const char* host, char* out, long size);
 void install_handler(void);
 long install_filter(void);
 long emulate_execve(long dirfd, const char* path, char* const* argv, char* const* envp, long flags);
+
+/* sysv.c */
+long emulate_sysv(long nr, const uint64_t* x);
 
 /* l2s.c */
 int l2s_stat(const char* host, struct kstat* st);

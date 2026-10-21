@@ -24,7 +24,7 @@ static const uint16_t trapped[] = {
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
-    NR_sendto,
+    NR_sendto, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt,
     NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
 };
 
@@ -182,7 +182,7 @@ static void foreign(int sig, struct ksiginfo* info, struct kucontext* uc) {
         case 268: /* setns: as proot, pretend (sandbox helpers carry on) */
             x[0] = 0;
             break;
-        default: /* clone3 (glibc falls back to clone), SysV IPC... */
+        default: /* clone3 (glibc falls back to clone), SysV semaphores and queues... */
             x[0] = (uint64_t) -ENOSYS;
         }
     } else if (h > 1) {
@@ -326,45 +326,57 @@ static long do_statx(long dirfd, const char* path, long flags, long mask, struct
 }
 
 /* bind() and connect() on a Unix socket path. */
-static long do_socket_path(long nr, long fd, const char* addr, long length) {
-    struct {
-        uint16_t family;
-        char path[108];
-    } un;
-    if (addr == 0 || length <= 2 || *(const uint16_t*) addr != AF_UNIX || addr[2] == 0 /* abstract */)
-        return sys(nr, fd, addr, length, 0);
-    char path[109], host[PATH_MAX];
-    long n = length - 2 < 108 ? length - 2 : 108;
-    memcpy(path, addr + 2, n);
-    path[n] = 0;
-    long r = host_path(AT_FDCWD, path, nr == NR_connect, host);
-    if (r < 0) return r;
-    long h = length_of(host);
-    if (h >= 108) return -ENAMETOOLONG; /* shortcut: no /proc/self/fd/N/name detour for long rootfs paths yet */
-    un.family = AF_UNIX;
-    memcpy(un.path, host, h + 1);
-    return sys(nr, fd, &un, 2 + h + 1, 0);
-}
-
-/* A Unix socket address with its path translated into @un; 0 if none to translate. */
-static long socket_address(const char* addr, long length, void* un, long* un_length) {
+/* A Unix socket address with its path translated into @un; 0 if none to
+ * translate. A host path too long for sockaddr_un goes through its directory,
+ * opened as *@dir (closed by the caller after the syscall, -1 if none):
+ * /proc/self/fd/<dir>/<name>. */
+static long socket_address(const char* addr, long length, int follow, void* un, long* un_length, long* dir) {
     struct sockaddr {
         uint16_t family;
         char path[108];
     }* out = un;
-    if (addr == 0 || length <= 2 || *(const uint16_t*) addr != AF_UNIX || addr[2] == 0) return 0;
+    *dir = -1;
+    if (addr == 0 || length <= 2 || *(const uint16_t*) addr != AF_UNIX || addr[2] == 0 /* abstract */) return 0;
     char path[109], host[PATH_MAX];
     long n = length - 2 < 108 ? length - 2 : 108;
     memcpy(path, addr + 2, n);
     path[n] = 0;
-    long r = host_path(AT_FDCWD, path, 1, host);
+    long r = host_path(AT_FDCWD, path, follow, host);
     if (r < 0) return r;
     long h = length_of(host);
-    if (h >= 108) return -ENAMETOOLONG;
+    if (h >= 108) {
+        long slash = h;
+        while (slash > 0 && host[slash] != '/') slash--;
+        host[slash] = 0;
+        long d = sys(NR_openat, AT_FDCWD, slash ? host : "/", O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+        if (d < 0) return d;
+        char* end = format_unsigned((char*) memcpy(out->path, "/proc/self/fd/", 14) + 14, (unsigned long) d);
+        if (end - out->path + (h - slash) >= 108) {
+            sys(NR_close, d, 0, 0, 0);
+            return -ENAMETOOLONG;
+        }
+        memcpy(end, host + slash, h - slash);
+        end[0] = '/';
+        end[h - slash] = 0;
+        *dir = d;
+        h = end + (h - slash) - out->path;
+    } else {
+        memcpy(out->path, host, h + 1);
+    }
     out->family = AF_UNIX;
-    memcpy(out->path, host, h + 1);
     *un_length = 2 + h + 1;
     return 1;
+}
+
+static long do_socket_path(long nr, long fd, const char* addr, long length) {
+    char un[110];
+    long un_length, dir;
+    long r = socket_address(addr, length, nr == NR_connect, un, &un_length, &dir);
+    if (r < 0) return r;
+    if (r == 0) return sys(nr, fd, addr, length, 0);
+    r = sys(nr, fd, un, un_length, 0);
+    if (dir >= 0) sys(NR_close, dir, 0, 0, 0);
+    return r;
 }
 
 struct kmsghdr {
@@ -384,6 +396,7 @@ static long do_sendmsg(long fd, const struct kmsghdr* m, long flags) {
     struct kmsghdr copy;
     char control[1024], un[110];
     int changed = 0;
+    long dir = -1;
     if (m != 0 && m->control != 0 && m->controllen >= 16 && m->controllen <= sizeof(control)) {
         for (size_t at = 0; at + 16 <= m->controllen;) {
             const char* c = (const char*) m->control + at;
@@ -406,7 +419,7 @@ static long do_sendmsg(long fd, const struct kmsghdr* m, long flags) {
     }
     if (m != 0 && m->name != 0) {
         long un_length;
-        long r = socket_address(m->name, m->namelen, un, &un_length);
+        long r = socket_address(m->name, m->namelen, 1, un, &un_length, &dir);
         if (r < 0) return r;
         if (r > 0) {
             if (!changed) copy = *m, changed = 1;
@@ -414,16 +427,20 @@ static long do_sendmsg(long fd, const struct kmsghdr* m, long flags) {
             copy.namelen = (uint32_t) un_length;
         }
     }
-    return sys(NR_sendmsg, fd, changed ? &copy : m, flags, 0);
+    long r = sys(NR_sendmsg, fd, changed ? &copy : m, flags, 0);
+    if (dir >= 0) sys(NR_close, dir, 0, 0, 0);
+    return r;
 }
 
 static long do_sendto(const uint64_t* x) {
     char un[110];
-    long un_length;
-    long r = socket_address((const char*) x[4], (long) x[5], un, &un_length);
+    long un_length, dir;
+    long r = socket_address((const char*) x[4], (long) x[5], 1, un, &un_length, &dir);
     if (r < 0) return r;
     if (r == 0) return sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) x[4], (long) x[5]);
-    return sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) un, un_length);
+    r = sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) un, un_length);
+    if (dir >= 0) sys(NR_close, dir, 0, 0, 0);
+    return r;
 }
 
 /* The emulated ids of Burrow process @pid, read where Burrow keeps them:
@@ -643,8 +660,19 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_linkat: {
         char from[PATH_MAX], to[PATH_MAX];
         long flags = (long) x[4];
-        if (empty(path) && (flags & AT_EMPTY_PATH)) return -ENOENT; /* shortcut: linkat(AT_EMPTY_PATH) not emulated yet */
-        long r = host_path(dirfd, path, (flags & AT_SYMLINK_FOLLOW) != 0, from);
+        long r;
+        if (empty(path) && (flags & AT_EMPTY_PATH)) {
+            /* The file of descriptor @dirfd, by its host path: an unnamed one (O_TMPFILE) cannot get a name. */
+            char link[32] = "/proc/self/fd/";
+            format_unsigned(link + 14, (unsigned long) dirfd);
+            r = sys(NR_readlinkat, AT_FDCWD, link, from, PATH_MAX - 1);
+            if (r < 0) return r == -ENOENT ? -EBADF : r;
+            from[r] = 0;
+            if (from[0] != '/' || (r > 10 && same(from + r - 10, " (deleted)"))) return -ENOENT;
+            flags = 0;
+        } else {
+            r = host_path(dirfd, path, (flags & AT_SYMLINK_FOLLOW) != 0, from);
+        }
         if (r < 0) return r;
         r = host_path((long) (int) x[2], (const char*) x[3], 0, to);
         if (r < 0) return r;
@@ -699,6 +727,10 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_sendmsg: return do_sendmsg((long) x[0], (const struct kmsghdr*) x[1], (long) x[2]);
     case NR_sendto: return do_sendto(x);
     case NR_getsockopt: return do_peercred(x);
+    case NR_shmget:
+    case NR_shmctl:
+    case NR_shmat:
+    case NR_shmdt: return emulate_sysv(nr, x);
     case NR_execve:
         return emulate_execve(AT_FDCWD, (const char*) x[0], (char* const*) x[1], (char* const*) x[2], 0);
     case NR_execveat:
