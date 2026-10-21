@@ -226,6 +226,22 @@ static void fake_statx(long r, struct kstatx* stx) {
 
 static int empty(const char* path) { return path != 0 && path[0] == 0; }
 
+/* The guest program of the Burrow process named by @guest, a /proc/<pid>/...
+ * path, read from its state like peer_ids() does; 0 if none (the launcher). */
+static long remote_exe(const char* guest, char* out) {
+    if (!starts_with(guest, "/proc/")) return 0;
+    const char* p = guest + 6;
+    long pid = (long) parse_unsigned(&p);
+    if (p == guest + 6) return 0;
+    struct {
+        void* base;
+        size_t length;
+    } local = {out, PATH_MAX}, remote = {cfg.exe, PATH_MAX};
+    if (sys6(NR_process_vm_readv, pid, (long) &local, 1, (long) &remote, 1, 0) != PATH_MAX) return 0;
+    out[PATH_MAX - 1] = 0;
+    return length_of(out);
+}
+
 static long do_readlink(long dirfd, const char* path, char* buf, long size) {
     if (size <= 0) return -EINVAL;
     if (empty(path)) return sys(NR_readlinkat, dirfd, path, buf, size);
@@ -241,7 +257,10 @@ static long do_readlink(long dirfd, const char* path, char* buf, long size) {
         r = sys(NR_readlinkat, AT_FDCWD, host, target, PATH_MAX - 1);
         if (r < 0) return r;
         target[r] = 0;
-        if (target[0] == '/') r = host_to_guest(target, target, PATH_MAX);
+        /* Another process's exe is Burrow: KWin finds its clients' desktop files by it. */
+        long n = same(target, cfg.self) ? remote_exe(guest, target) : 0;
+        if (n > 0) r = n;
+        else if (target[0] == '/') r = host_to_guest(target, target, PATH_MAX);
     }
     if (r < 0) return r;
     if (r > size) r = size;
