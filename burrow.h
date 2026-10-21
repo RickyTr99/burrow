@@ -115,12 +115,15 @@ struct kstat {
     uint32_t unused[2];
 };
 
-/* The head of struct statx. */
+/* struct statx up to the device. */
 struct kstatx {
     uint32_t mask, blksize;
     uint64_t attributes;
     uint32_t nlink, uid, gid;
-    uint16_t mode;
+    uint16_t mode, pad;
+    uint64_t ino, size, blocks, attributes_mask;
+    int64_t times[8];
+    uint32_t rdev_major, rdev_minor, dev_major, dev_minor;
 };
 
 struct ksigaction {

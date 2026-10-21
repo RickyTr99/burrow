@@ -214,14 +214,33 @@ static void foreign(int sig, struct ksiginfo* info, struct kucontext* uc) {
 
 /* -- Path syscalls ---------------------------------------------------------------------- */
 
+/* Android's shared storage, where the app may do anything with every file
+ * (all-files access): its files show as the guest's own, else KIO marks
+ * those of other apps unreadable. Its device, found once per process. */
+static int on_shared_storage(uint32_t major, uint32_t minor) {
+    static uint64_t device = 0; /* major << 32 | minor, 1 if none */
+    if (device == 0) {
+        struct kstat st;
+        uint64_t d = 1;
+        if (sys(NR_newfstatat, AT_FDCWD, "/storage/emulated/0", &st, 0) == 0)
+            d = (uint64_t) ((st.dev >> 8) & 0xfff) << 32 | ((st.dev & 0xff) | ((st.dev >> 12) & 0xfff00));
+        __atomic_store_n(&device, d, __ATOMIC_RELAXED);
+    }
+    return __atomic_load_n(&device, __ATOMIC_RELAXED) == ((uint64_t) major << 32 | minor);
+}
+
 static void fake_stat(long r, struct kstat* st) {
-    if (r == 0) fake_owner(&st->uid, &st->gid);
+    if (r != 0) return;
+    if (on_shared_storage((st->dev >> 8) & 0xfff, (st->dev & 0xff) | ((st->dev >> 12) & 0xfff00)))
+        st->uid = cfg.real_uid, st->gid = cfg.real_gid;
+    fake_owner(&st->uid, &st->gid);
 }
 
 static void fake_statx(long r, struct kstatx* stx) {
     if (r != 0) return;
     uint32_t uid = (stx->mask & STATX_UID) ? stx->uid : ~0u;
     uint32_t gid = (stx->mask & STATX_GID) ? stx->gid : ~0u;
+    if (on_shared_storage(stx->dev_major, stx->dev_minor)) uid = cfg.real_uid, gid = cfg.real_gid;
     fake_owner(&uid, &gid);
     if (stx->mask & STATX_UID) stx->uid = uid;
     if (stx->mask & STATX_GID) stx->gid = gid;
@@ -336,7 +355,6 @@ static long do_statx(long dirfd, const char* path, long flags, long mask, struct
     return r;
 }
 
-/* bind() and connect() on a Unix socket path. */
 /* A Unix socket address with its path translated into @un; 0 if none to
  * translate. A host path too long for sockaddr_un goes through its directory,
  * opened as *@dir (closed by the caller after the syscall, -1 if none):
@@ -379,6 +397,7 @@ static long socket_address(const char* addr, long length, int follow, void* un, 
     return 1;
 }
 
+/* bind() and connect() on a Unix socket path. */
 static long do_socket_path(long nr, long fd, const char* addr, long length) {
     char un[110];
     long un_length, dir;
