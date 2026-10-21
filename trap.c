@@ -1,0 +1,582 @@
+/*
+ * The seccomp filter and the SIGSYS handler that emulates the trapped
+ * syscalls in the guest process.
+ *
+ * The handler runs on the trapping thread with the syscall's registers in the
+ * signal frame: it makes the real syscalls through the gadget and writes the
+ * result into x0. The kernel resets a blocked or ignored SIGSYS to the
+ * default action (death) before delivering a trap, so the guest never gets to
+ * block it: masks are filtered and the guest's own SIGSYS disposition is only
+ * recorded (its handler gets the traps of its own filters).
+ */
+
+#include "burrow.h"
+
+extern char burrow_gadget[];
+
+/* -- The filter --------------------------------------------------------------------- */
+
+static const uint16_t trapped[] = {
+    NR_setxattr, NR_lsetxattr, NR_getxattr, NR_lgetxattr, NR_listxattr, NR_llistxattr, NR_removexattr,
+    NR_lremovexattr, NR_getcwd, NR_inotify_add_watch, NR_mknodat, NR_mkdirat, NR_unlinkat, NR_symlinkat,
+    NR_linkat, NR_renameat, NR_statfs, NR_truncate, NR_faccessat, NR_chdir, NR_fchmodat, NR_fchownat, NR_fchown,
+    NR_openat, NR_readlinkat, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
+    NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
+    NR_setfsuid, NR_setfsgid, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
+    NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2,
+};
+
+struct sock_filter {
+    uint16_t code;
+    uint8_t jt, jf;
+    uint32_t k;
+};
+
+#define LD_ABS 0x20 /* BPF_LD | BPF_W | BPF_ABS */
+#define JEQ 0x15    /* BPF_JMP | BPF_JEQ | BPF_K */
+#define RET 0x06    /* BPF_RET | BPF_K */
+#define RET_ALLOW 0x7fff0000u
+#define RET_TRAP 0x00030000u
+#define AUDIT_ARCH_AARCH64 0xc00000b7u
+#define N_TRAPPED (sizeof(trapped) / sizeof(*trapped))
+
+long install_filter(void) {
+    uint64_t gadget = (uint64_t) burrow_gadget;
+    struct sock_filter f[10 + N_TRAPPED + 2];
+    int i = 0;
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
+    f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 12}; /* instruction pointer, high half */
+    f[i++] = (struct sock_filter){JEQ, 0, 4, (uint32_t) (gadget >> 32)};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 8};
+    f[i++] = (struct sock_filter){JEQ, 1, 0, (uint32_t) gadget + 4};
+    f[i++] = (struct sock_filter){JEQ, 0, 1, (uint32_t) gadget};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 0}; /* nr */
+    for (unsigned t = 0; t < N_TRAPPED; t++)
+        f[i++] = (struct sock_filter){JEQ, (uint8_t) (N_TRAPPED - t), 0, trapped[t]};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    struct {
+        unsigned short len;
+        struct sock_filter* filter;
+    } prog = {(unsigned short) i, f};
+    long r = sys(NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0);
+    if (r < 0) return r;
+    return sys(NR_seccomp, 1 /* SECCOMP_SET_MODE_FILTER */, 0, &prog, 0);
+}
+
+/* -- Ids (proot's fake_id0) ------------------------------------------------------------ */
+
+static uint32_t id(int which) { return __atomic_load_n(&cfg.ids[which], __ATOMIC_RELAXED); }
+static void set_id(int which, uint32_t value) { __atomic_store_n(&cfg.ids[which], value, __ATOMIC_RELAXED); }
+
+/* Files the app owns show as the saved set-ids': root until a program drops
+ * its ids (apt's _apt then finds its own files). */
+static void fake_owner(uint32_t* uid, uint32_t* gid) {
+    if (*uid == cfg.real_uid) *uid = id(SUID);
+    if (*gid == cfg.real_gid) *gid = id(SGID);
+}
+
+static int one_of(uint32_t v, int base) { return v == id(base) || v == id(base + 1) || v == id(base + 2); }
+
+/* setuid() and friends, @base RUID or RGID. -1 leaves an id as it is. */
+static long set_ids(int base, uint32_t r, uint32_t e, uint32_t s, int kind) {
+    int privileged = id(EUID) == 0;
+    uint32_t none = (uint32_t) -1;
+    if (kind == 1) { /* setuid */
+        if (privileged) {
+            set_id(base, r), set_id(base + 1, r), set_id(base + 2, r), set_id(base + 3, r);
+        } else if (r == id(base) || r == id(base + 2)) {
+            set_id(base + 1, r), set_id(base + 3, r);
+        } else {
+            return -EPERM;
+        }
+        return 0;
+    }
+    if (!privileged) {
+        if (r != none && !one_of(r, base)) return -EPERM;
+        if (e != none && !one_of(e, base)) return -EPERM;
+        if (s != none && !one_of(s, base)) return -EPERM;
+    }
+    uint32_t old_r = id(base);
+    if (r != none) set_id(base, r);
+    if (e != none) set_id(base + 1, e);
+    if (kind == 2) { /* setreuid: the saved id follows a new effective one */
+        if (r != none || (e != none && e != old_r)) set_id(base + 2, id(base + 1));
+    } else if (s != none) {
+        set_id(base + 2, s);
+    }
+    set_id(base + 3, id(base + 1));
+    return 0;
+}
+
+static long get_ids(int base, uint32_t* r, uint32_t* e, uint32_t* s) {
+    *r = id(base);
+    *e = id(base + 1);
+    *s = id(base + 2);
+    return 0;
+}
+
+static long set_fs_id(int base, uint32_t v) {
+    uint32_t old = id(base + 3);
+    if (id(EUID) == 0 || one_of(v, base) || v == old) set_id(base + 3, v);
+    return old;
+}
+
+/* -- Signals ------------------------------------------------------------------------- */
+
+static struct ksigaction guest_sigsys; /* the guest's SIGSYS disposition */
+
+#define SIGSYS_BIT (1ull << (SIGSYS - 1))
+
+static long do_sigaction(long sig, const struct ksigaction* act, struct ksigaction* old, long size) {
+    if (sig == SIGSYS) {
+        struct ksigaction previous = guest_sigsys;
+        if (act != 0) guest_sigsys = *act;
+        if (old != 0) *old = previous;
+        return 0;
+    }
+    struct ksigaction mine;
+    if (act != 0) {
+        mine = *act;
+        mine.mask &= ~SIGSYS_BIT;
+        act = &mine;
+    }
+    return sys(NR_rt_sigaction, sig, act, old, size);
+}
+
+static long do_sigprocmask(long how, const uint64_t* set, uint64_t* old, long size) {
+    uint64_t mine;
+    if (set != 0 && how != 1 /* SIG_UNBLOCK */) {
+        mine = *set & ~SIGSYS_BIT;
+        set = &mine;
+    }
+    return sys(NR_rt_sigprocmask, how, set, old, size);
+}
+
+/* A SIGSYS that is not ours: the guest's own filters (Firefox's sandbox),
+ * Android's, or a kill(). */
+static void foreign(int sig, struct ksiginfo* info, struct kucontext* uc) {
+    uintptr_t h = guest_sigsys.handler;
+    if (h > 1) {
+        if (guest_sigsys.flags & SA_SIGINFO) {
+            ((void (*)(int, struct ksiginfo*, struct kucontext*)) h)(sig, info, uc);
+        } else {
+            ((void (*)(int)) h)(sig);
+        }
+    } else if (info->code == SYS_SECCOMP) {
+        uc->mcontext.regs[0] = (uint64_t) -ENOSYS;
+    } else if (h == 0) {
+        /* The default action: die by it. */
+        struct ksigaction dfl = {0, 0, 0, 0};
+        sys(NR_rt_sigaction, SIGSYS, &dfl, 0, 8);
+        sys(NR_tgkill, sys(NR_getpid, 0, 0, 0, 0), sys(NR_gettid, 0, 0, 0, 0), SIGSYS, 0);
+    }
+}
+
+/* -- Path syscalls ---------------------------------------------------------------------- */
+
+static void fake_stat(long r, struct kstat* st) {
+    if (r == 0) fake_owner(&st->uid, &st->gid);
+}
+
+static void fake_statx(long r, struct kstatx* stx) {
+    if (r != 0) return;
+    uint32_t uid = (stx->mask & STATX_UID) ? stx->uid : ~0u;
+    uint32_t gid = (stx->mask & STATX_GID) ? stx->gid : ~0u;
+    fake_owner(&uid, &gid);
+    if (stx->mask & STATX_UID) stx->uid = uid;
+    if (stx->mask & STATX_GID) stx->gid = gid;
+}
+
+/* An *at() syscall on the path (@dirfd, @path) with its host path instead. */
+#define ON_HOST(follow, call)                                    \
+    do {                                                         \
+        char host[PATH_MAX];                                     \
+        long r_ = host_path(dirfd, path, (follow), host);        \
+        return r_ < 0 ? r_ : (call);                             \
+    } while (0)
+
+static int empty(const char* path) { return path != 0 && path[0] == 0; }
+
+static long do_readlink(long dirfd, const char* path, char* buf, long size) {
+    if (size <= 0) return -EINVAL;
+    if (empty(path)) return sys(NR_readlinkat, dirfd, path, buf, size);
+    char guest[PATH_MAX], host[PATH_MAX], target[PATH_MAX];
+    if (path == 0) return -EFAULT;
+    long r = guest_absolute(dirfd, path, guest);
+    if (r < 0) return r;
+    if (same(guest, "/proc/self/exe") || same(guest, "/proc/thread-self/exe")) {
+        r = copy(target, PATH_MAX, cfg.exe);
+    } else {
+        r = to_host(guest, 0, host, 0);
+        if (r < 0) return r;
+        r = sys(NR_readlinkat, AT_FDCWD, host, target, PATH_MAX - 1);
+        if (r < 0) return r;
+        target[r] = 0;
+        if (target[0] == '/') r = host_to_guest(target, target, PATH_MAX);
+    }
+    if (r < 0) return r;
+    if (r > size) r = size;
+    memcpy(buf, target, r);
+    return r;
+}
+
+static long do_getcwd(char* buf, long size) {
+    char host[PATH_MAX], guest[PATH_MAX];
+    long r = sys(NR_getcwd, host, PATH_MAX, 0, 0);
+    if (r < 0) return r;
+    r = host_to_guest(host, guest, PATH_MAX);
+    if (r < 0) return r;
+    if (r + 1 > size) return -ERANGE;
+    memcpy(buf, guest, r + 1);
+    return r + 1;
+}
+
+/* fchownat(): a fake root's chown succeeds on any file it can see. */
+static long do_chown(long dirfd, const char* path, long flags) {
+    struct kstat st;
+    if (empty(path) && (flags & AT_EMPTY_PATH)) return sys(NR_fstat, dirfd, &st, 0, 0);
+    ON_HOST(!(flags & AT_SYMLINK_NOFOLLOW), sys(NR_newfstatat, AT_FDCWD, host, &st, AT_SYMLINK_NOFOLLOW));
+}
+
+/* stat() and lstat(): a faked hard link shows as its file. The last
+ * component is looked at unfollowed first: most are no symlink, and that one
+ * call answers both. */
+static long do_stat(long dirfd, const char* path, struct kstat* st, long flags) {
+    long r;
+    if (empty(path) && (flags & AT_EMPTY_PATH)) {
+        r = sys(NR_newfstatat, dirfd, path, st, flags);
+    } else {
+        char host[PATH_MAX];
+        r = host_path(dirfd, path, 0, host);
+        if (r == 0) r = sys(NR_newfstatat, AT_FDCWD, host, st, AT_SYMLINK_NOFOLLOW);
+        if (r == 0 && (st->mode & S_IFMT) == S_IFLNK && !l2s_stat(host, st) && !(flags & AT_SYMLINK_NOFOLLOW)) {
+            r = host_path(dirfd, path, 1, host);
+            if (r == 0) r = sys(NR_newfstatat, AT_FDCWD, host, st, 0);
+        }
+    }
+    fake_stat(r, st);
+    return r;
+}
+
+static long do_statx(long dirfd, const char* path, long flags, long mask, struct kstatx* stx) {
+    long r;
+    if (empty(path) && (flags & AT_EMPTY_PATH)) {
+        r = sys6(NR_statx, dirfd, (long) path, flags, mask, (long) stx, 0);
+    } else {
+        char host[PATH_MAX];
+        long nofollow = (flags & ~AT_EMPTY_PATH) | AT_SYMLINK_NOFOLLOW;
+        r = host_path(dirfd, path, 0, host);
+        if (r == 0) r = sys6(NR_statx, AT_FDCWD, (long) host, nofollow, mask | 1 /* STATX_TYPE */, (long) stx, 0);
+        if (r == 0 && (stx->mode & S_IFMT) == S_IFLNK && !l2s_statx(host, nofollow, mask, stx) &&
+            !(flags & AT_SYMLINK_NOFOLLOW)) {
+            r = host_path(dirfd, path, 1, host);
+            if (r == 0) r = sys6(NR_statx, AT_FDCWD, (long) host, nofollow & ~AT_SYMLINK_NOFOLLOW, mask, (long) stx, 0);
+        }
+    }
+    fake_statx(r, stx);
+    return r;
+}
+
+/* bind() and connect() on a Unix socket path. */
+static long do_socket_path(long nr, long fd, const char* addr, long length) {
+    struct {
+        uint16_t family;
+        char path[108];
+    } un;
+    if (addr == 0 || length <= 2 || *(const uint16_t*) addr != AF_UNIX || addr[2] == 0 /* abstract */)
+        return sys(nr, fd, addr, length, 0);
+    char path[109], host[PATH_MAX];
+    long n = length - 2 < 108 ? length - 2 : 108;
+    memcpy(path, addr + 2, n);
+    path[n] = 0;
+    long r = host_path(AT_FDCWD, path, nr == NR_connect, host);
+    if (r < 0) return r;
+    long h = length_of(host);
+    if (h >= 108) return -ENAMETOOLONG; /* shortcut: no /proc/self/fd/N/name detour for long rootfs paths yet */
+    un.family = AF_UNIX;
+    memcpy(un.path, host, h + 1);
+    return sys(nr, fd, &un, 2 + h + 1, 0);
+}
+
+/* -- execve ------------------------------------------------------------------------------ */
+
+static void* map(long size) {
+    long p = sys6(NR_mmap, 0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p < 0 && p > -4096 ? 0 : (void*) p;
+}
+
+/* Reads "#!interpreter [argument]" from @head (@n bytes). Returns 1 with the
+ * strings cut in place, 0 if it is no script. */
+static int shebang(char* head, long n, char** interpreter, char** argument) {
+    if (n < 2 || head[0] != '#' || head[1] != '!') return 0;
+    long i = 2, end = 2;
+    while (end < n && head[end] != '\n') end++;
+    head[end < n ? end : n - 1] = 0;
+    while (head[i] == ' ' || head[i] == '\t') i++;
+    *interpreter = head + i;
+    while (head[i] && head[i] != ' ' && head[i] != '\t') i++;
+    *argument = 0;
+    if (head[i]) {
+        head[i++] = 0;
+        while (head[i] == ' ' || head[i] == '\t') i++;
+        if (head[i]) {
+            *argument = head + i;
+            long last = length_of(head + i) - 1;
+            while (last >= 0 && (head[i + last] == ' ' || head[i + last] == '\t')) head[i + last--] = 0;
+        }
+    }
+    return **interpreter != 0;
+}
+
+long emulate_execve(long dirfd, const char* path, char* const* argv, char* const* envp, long flags) {
+    char guest[PATH_MAX], host[PATH_MAX], resolved[PATH_MAX];
+    char heads[4][256];
+    /* argv's head after the scripts' interpreters: at each level the kernel
+     * runs "interpreter [argument] file args[1..]". */
+    const char* head[12];
+    int head_count = 1;
+    const char* file = path;
+    long r;
+    if (path == 0) return -EFAULT;
+    head[0] = argv != 0 ? argv[0] : 0;
+    if (empty(path) && (flags & AT_EMPTY_PATH)) {
+        char link[32] = "/proc/self/fd/";
+        format_unsigned(link + 14, (unsigned long) (int) dirfd);
+        r = sys(NR_readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
+        if (r < 0) return -EBADF;
+        host[r] = 0;
+        r = host_to_guest(host, guest, PATH_MAX);
+    } else {
+        if (path[0] == 0) return -ENOENT;
+        r = guest_absolute(dirfd, path, guest);
+    }
+    if (r < 0) return r;
+    /* The process name: the base name of the file execve() was given. */
+    char name[16];
+    const char* b = guest;
+    for (const char* p = guest; *p; p++)
+        if (*p == '/' && p[1]) b = p + 1;
+    long l = 0;
+    while (b[l] && b[l] != '/' && l < 15) name[l] = b[l], l++;
+    name[l] = 0;
+    for (int depth = 0;; depth++) {
+        r = to_host(guest, !(flags & AT_SYMLINK_NOFOLLOW), host, resolved);
+        if (r < 0) return r;
+        struct kstat st;
+        r = sys(NR_newfstatat, AT_FDCWD, host, &st, 0);
+        if (r < 0) return r;
+        if ((st.mode & S_IFMT) != S_IFREG) return -EACCES;
+        r = sys(NR_faccessat, AT_FDCWD, host, X_OK, 0);
+        if (r < 0) return r;
+        long fd = sys(NR_openat, AT_FDCWD, host, O_RDONLY | O_CLOEXEC, 0);
+        if (fd < 0) return fd;
+        char* h = heads[depth];
+        long n = sys(NR_pread64, fd, h, sizeof(heads[0]) - 1, 0);
+        sys(NR_close, fd, 0, 0, 0);
+        if (n < 0) return n;
+        h[n] = 0;
+        if (n >= 20 && h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F') {
+            if (h[4] != 2 /* ELFCLASS64 */ || *(uint16_t*) (h + 18) != 183 /* EM_AARCH64 */) return -ENOEXEC;
+            break;
+        }
+        char *interpreter, *argument;
+        if (!shebang(h, n, &interpreter, &argument)) return -ENOEXEC;
+        if (depth == 3) return -ELOOP;
+        const char* rest[12];
+        int rest_count = head_count - 1;
+        memcpy(rest, head + 1, rest_count * sizeof(*rest));
+        head_count = 0;
+        head[head_count++] = interpreter;
+        if (argument) head[head_count++] = argument;
+        head[head_count++] = file;
+        memcpy(head + head_count, rest, rest_count * sizeof(*rest));
+        head_count += rest_count;
+        file = interpreter;
+        flags &= ~AT_SYMLINK_NOFOLLOW;
+        r = guest_absolute(AT_FDCWD, interpreter, guest);
+        if (r < 0) return r;
+    }
+
+    long argc = 0, envc = 0;
+    while (argv != 0 && argv[argc] != 0) argc++;
+    while (envp != 0 && envp[envc] != 0) envc++;
+
+    long words = head_count + argc + envc + 3;
+    long state_size = 3 * PATH_MAX + MAX_BINDS * 800;
+    long size = words * 8 + state_size;
+    char** block = map(size);
+    if (block == 0) return -ENOMEM;
+    char* state = (char*) (block + words);
+    memcpy(state, "BURROW=", 7);
+    r = encode_config(state + 7, state_size - 7, resolved, host, name);
+    if (r < 0) {
+        sys(NR_munmap, block, size, 0, 0);
+        return r;
+    }
+    char** new_argv = block;
+    long a = 0;
+    for (int i = 0; i < head_count; i++)
+        if (head[i] != 0) new_argv[a++] = (char*) head[i];
+    for (long i = 1; i < argc; i++) new_argv[a++] = argv[i];
+    new_argv[a++] = 0;
+    char** new_envp = new_argv + a;
+    long e = 0;
+    for (long i = 0; i < envc; i++)
+        if (!starts_with(envp[i], "BURROW=")) new_envp[e++] = envp[i];
+    new_envp[e++] = state;
+    new_envp[e] = 0;
+    r = sys(NR_execve, cfg.self, new_argv, new_envp, 0);
+    sys(NR_munmap, block, size, 0, 0);
+    return r;
+}
+
+/* -- Dispatch ------------------------------------------------------------------------------- */
+
+static long emulate(long nr, const uint64_t* x) {
+    long dirfd = (long) (int) x[0];
+    const char* path = (const char*) x[1];
+    switch (nr) {
+    case NR_openat: {
+        long flags = (long) x[2];
+        int follow = !(flags & O_NOFOLLOW) && (flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
+        ON_HOST(follow, sys(NR_openat, AT_FDCWD, host, flags, x[3]));
+    }
+    case NR_openat2: {
+        const struct open_how* how = (const struct open_how*) x[2];
+        int follow = !(how->flags & O_NOFOLLOW) && (how->flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
+        ON_HOST(follow, sys(NR_openat2, AT_FDCWD, host, how, x[3]));
+    }
+    case NR_newfstatat: return do_stat(dirfd, path, (struct kstat*) x[2], (long) x[3]);
+    case NR_fstat: {
+        long r = sys(NR_fstat, x[0], x[1], 0, 0);
+        fake_stat(r, (struct kstat*) x[1]);
+        return r;
+    }
+    case NR_statx: return do_statx(dirfd, path, (long) x[2], (long) x[3], (struct kstatx*) x[4]);
+    case NR_faccessat: ON_HOST(1, sys(NR_faccessat, AT_FDCWD, host, x[2], 0));
+    case NR_faccessat2:
+        if (empty(path) && (x[3] & AT_EMPTY_PATH)) return sys(NR_faccessat2, x[0], path, x[2], x[3]);
+        ON_HOST(!(x[3] & AT_SYMLINK_NOFOLLOW), sys(NR_faccessat2, AT_FDCWD, host, x[2], x[3]));
+    case NR_readlinkat: return do_readlink(dirfd, path, (char*) x[2], (long) x[3]);
+    case NR_getcwd: return do_getcwd((char*) x[0], (long) x[1]);
+    case NR_chdir: {
+        dirfd = AT_FDCWD;
+        path = (const char*) x[0];
+        ON_HOST(1, sys(NR_chdir, host, 0, 0, 0));
+    }
+    case NR_mkdirat: ON_HOST(0, sys(NR_mkdirat, AT_FDCWD, host, x[2], 0));
+    case NR_mknodat: ON_HOST(0, sys(NR_mknodat, AT_FDCWD, host, x[2], x[3]));
+    case NR_unlinkat: {
+        char host[PATH_MAX];
+        long r = host_path(dirfd, path, 0, host);
+        if (r < 0) return r;
+        if (!(x[2] & 0x200 /* AT_REMOVEDIR */) && (r = l2s_unlinked(host)) < 0) return r;
+        return sys(NR_unlinkat, AT_FDCWD, host, x[2], 0);
+    }
+    case NR_symlinkat: {
+        dirfd = (long) (int) x[1];
+        path = (const char*) x[2];
+        ON_HOST(0, sys(NR_symlinkat, x[0], AT_FDCWD, host, 0));
+    }
+    case NR_linkat: {
+        char from[PATH_MAX], to[PATH_MAX];
+        long flags = (long) x[4];
+        if (empty(path) && (flags & AT_EMPTY_PATH)) return -ENOENT; /* shortcut: linkat(AT_EMPTY_PATH) not emulated yet */
+        long r = host_path(dirfd, path, (flags & AT_SYMLINK_FOLLOW) != 0, from);
+        if (r < 0) return r;
+        r = host_path((long) (int) x[2], (const char*) x[3], 0, to);
+        if (r < 0) return r;
+        r = sys6(NR_linkat, AT_FDCWD, (long) from, AT_FDCWD, (long) to, flags & AT_SYMLINK_FOLLOW, 0);
+        return r == -EACCES || r == -EPERM ? l2s_link(from, to) : r;
+    }
+    case NR_renameat:
+    case NR_renameat2: {
+        char from[PATH_MAX];
+        long r = host_path(dirfd, path, 0, from);
+        if (r < 0) return r;
+        char to[PATH_MAX];
+        r = host_path((long) (int) x[2], (const char*) x[3], 0, to);
+        if (r < 0) return r;
+        /* A faked hard link replaced: one link less. */
+        if ((r = l2s_unlinked(to)) < 0) return r;
+        return sys6(NR_renameat2, AT_FDCWD, (long) from, AT_FDCWD, (long) to, nr == NR_renameat ? 0 : (long) x[4], 0);
+    }
+    case NR_fchmodat: ON_HOST(1, sys(NR_fchmodat, AT_FDCWD, host, x[2], 0));
+    case NR_fchmodat2:
+        if (empty(path) && (x[3] & AT_EMPTY_PATH)) return sys(NR_fchmodat2, x[0], path, x[2], x[3]);
+        ON_HOST(!(x[3] & AT_SYMLINK_NOFOLLOW), sys(NR_fchmodat2, AT_FDCWD, host, x[2], x[3] & ~AT_EMPTY_PATH));
+    case NR_fchownat: return do_chown(dirfd, path, (long) x[4]);
+    case NR_fchown: {
+        struct kstat st;
+        return sys(NR_fstat, x[0], &st, 0, 0);
+    }
+    case NR_utimensat:
+        if (path == 0) return sys(NR_utimensat, x[0], 0, x[2], x[3]);
+        if (empty(path) && (x[3] & AT_EMPTY_PATH)) return sys(NR_utimensat, x[0], path, x[2], x[3]);
+        ON_HOST(!(x[3] & AT_SYMLINK_NOFOLLOW), sys(NR_utimensat, AT_FDCWD, host, x[2], x[3]));
+    case NR_truncate:
+    case NR_statfs:
+    case NR_setxattr:
+    case NR_lsetxattr:
+    case NR_getxattr:
+    case NR_lgetxattr:
+    case NR_listxattr:
+    case NR_llistxattr:
+    case NR_removexattr:
+    case NR_lremovexattr: {
+        int follow = nr != NR_lsetxattr && nr != NR_lgetxattr && nr != NR_llistxattr && nr != NR_lremovexattr;
+        dirfd = AT_FDCWD;
+        path = (const char*) x[0];
+        ON_HOST(follow, sys6(nr, (long) host, (long) x[1], (long) x[2], (long) x[3], (long) x[4], 0));
+    }
+    case NR_inotify_add_watch:
+        dirfd = AT_FDCWD;
+        ON_HOST(!(x[2] & IN_DONT_FOLLOW), sys(NR_inotify_add_watch, x[0], host, x[2], 0));
+    case NR_bind:
+    case NR_connect: return do_socket_path(nr, (long) x[0], (const char*) x[1], (long) x[2]);
+    case NR_execve:
+        return emulate_execve(AT_FDCWD, (const char*) x[0], (char* const*) x[1], (char* const*) x[2], 0);
+    case NR_execveat:
+        return emulate_execve(dirfd, path, (char* const*) x[2], (char* const*) x[3], (long) x[4]);
+
+    case NR_getuid: return id(RUID);
+    case NR_geteuid: return id(EUID);
+    case NR_getgid: return id(RGID);
+    case NR_getegid: return id(EGID);
+    case NR_getresuid: return get_ids(RUID, (uint32_t*) x[0], (uint32_t*) x[1], (uint32_t*) x[2]);
+    case NR_getresgid: return get_ids(RGID, (uint32_t*) x[0], (uint32_t*) x[1], (uint32_t*) x[2]);
+    case NR_setuid: return set_ids(RUID, (uint32_t) x[0], 0, 0, 1);
+    case NR_setgid: return set_ids(RGID, (uint32_t) x[0], 0, 0, 1);
+    case NR_setreuid: return set_ids(RUID, (uint32_t) x[0], (uint32_t) x[1], (uint32_t) -1, 2);
+    case NR_setregid: return set_ids(RGID, (uint32_t) x[0], (uint32_t) x[1], (uint32_t) -1, 2);
+    case NR_setresuid: return set_ids(RUID, (uint32_t) x[0], (uint32_t) x[1], (uint32_t) x[2], 3);
+    case NR_setresgid: return set_ids(RGID, (uint32_t) x[0], (uint32_t) x[1], (uint32_t) x[2], 3);
+    case NR_setfsuid: return set_fs_id(RUID, (uint32_t) x[0]);
+    case NR_setfsgid: return set_fs_id(RGID, (uint32_t) x[0]);
+    case NR_setgroups: return id(EUID) == 0 ? 0 : -EPERM;
+
+    case NR_rt_sigaction:
+        return do_sigaction((long) x[0], (const struct ksigaction*) x[1], (struct ksigaction*) x[2], (long) x[3]);
+    case NR_rt_sigprocmask:
+        return do_sigprocmask((long) x[0], (const uint64_t*) x[1], (uint64_t*) x[2], (long) x[3]);
+    }
+    return -ENOSYS;
+}
+
+static void on_sigsys(int sig, struct ksiginfo* info, struct kucontext* uc) {
+    if (info->code != SYS_SECCOMP || info->errno_ != TRAP_DATA) {
+        foreign(sig, info, uc);
+        return;
+    }
+    uint64_t* x = uc->mcontext.regs;
+    x[0] = (uint64_t) emulate(info->syscall, x);
+}
+
+void install_handler(void) {
+    struct ksigaction act = {(uintptr_t) on_sigsys, SA_SIGINFO | SA_ONSTACK | SA_NODEFER, 0, 0};
+    if (sys(NR_rt_sigaction, SIGSYS, &act, 0, 8) < 0) die("cannot install the SIGSYS handler", 0);
+}
