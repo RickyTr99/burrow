@@ -39,12 +39,13 @@ struct sock_filter {
 #define RET 0x06    /* BPF_RET | BPF_K */
 #define RET_ALLOW 0x7fff0000u
 #define RET_TRAP 0x00030000u
+#define RET_ERRNO 0x00050000u
 #define AUDIT_ARCH_AARCH64 0xc00000b7u
 #define N_TRAPPED (sizeof(trapped) / sizeof(*trapped))
 
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 7];
+    struct sock_filter f[10 + N_TRAPPED + 14];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -59,13 +60,23 @@ long install_filter(void) {
     for (unsigned t = 0; t < N_TRAPPED; t++)
         f[i++] = (struct sock_filter){JEQ, (uint8_t) (N_TRAPPED - t + 1), 0, trapped[t]};
     /* getsockopt(), only for SO_PEERCRED: the ids it reports are real. */
-    f[i++] = (struct sock_filter){JEQ, 2, 0, NR_getsockopt};
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    f[i++] = (struct sock_filter){JEQ, 2, 6, NR_getsockopt};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW}; /* unused: keeps the jumps above to RET_TRAP */
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
     f[i++] = (struct sock_filter){JEQ, 0, 1, 17 /* SO_PEERCRED */};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* socket(AF_NETLINK, *, NETLINK_AUDIT): SELinux says EACCES, which PAM
+     * takes for a broken audit system (su and sudo fail); a kernel without
+     * audit says EPROTONOSUPPORT. */
+    f[i++] = (struct sock_filter){JEQ, 0, 4, NR_socket};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 16}; /* args[0], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 2, 16 /* AF_NETLINK */};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
+    f[i++] = (struct sock_filter){JEQ, 1, 0, 9 /* NETLINK_AUDIT */};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 93 /* EPROTONOSUPPORT */};
     struct {
         unsigned short len;
         struct sock_filter* filter;
@@ -605,6 +616,23 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     return r;
 }
 
+/* openat()/openat2() of @host; @a and @b are the call's third and fourth
+ * arguments. Root opens files whatever their mode: when the fake root is
+ * refused a file of the app's, it gets the permission it lacks for the time
+ * of the open, as proot lends u+rw. */
+static long open_as_root(long nr, const char* host, long flags, long a, long b) {
+    long r = sys(nr, AT_FDCWD, host, a, b);
+    if (r != -EACCES || id(FSUID) != 0 || (flags & O_PATH)) return r;
+    struct kstat st;
+    if (sys(NR_newfstatat, AT_FDCWD, host, &st, 0) < 0 || st.uid != cfg.real_uid) return r;
+    uint32_t need = (flags & 3) == 0 ? 0400 : (flags & 3) == 1 ? 0200 : 0600;
+    if ((st.mode & need) == need) return r;
+    if (sys(NR_fchmodat, AT_FDCWD, host, (st.mode & 07777) | need, 0) < 0) return r;
+    r = sys(nr, AT_FDCWD, host, a, b);
+    sys(NR_fchmodat, AT_FDCWD, host, st.mode & 07777, 0);
+    return r;
+}
+
 /* -- Dispatch ------------------------------------------------------------------------------- */
 
 static long emulate(long nr, const uint64_t* x) {
@@ -618,12 +646,12 @@ static long emulate(long nr, const uint64_t* x) {
          * glibc's tmpfile()) fall back to a named file. */
         if (flags & 020000000 /* __O_TMPFILE */) return -95 /* EOPNOTSUPP */;
         int follow = !(flags & O_NOFOLLOW) && (flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
-        ON_HOST(follow, sys(NR_openat, AT_FDCWD, host, flags, x[3]));
+        ON_HOST(follow, open_as_root(NR_openat, host, flags, flags, (long) x[3]));
     }
     case NR_openat2: {
         const struct open_how* how = (const struct open_how*) x[2];
         int follow = !(how->flags & O_NOFOLLOW) && (how->flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
-        ON_HOST(follow, sys(NR_openat2, AT_FDCWD, host, how, x[3]));
+        ON_HOST(follow, open_as_root(NR_openat2, host, (long) how->flags, (long) how, (long) x[3]));
     }
     case NR_newfstatat: return do_stat(dirfd, path, (struct kstat*) x[2], (long) x[3]);
     case NR_fstat: {
@@ -650,7 +678,22 @@ static long emulate(long nr, const uint64_t* x) {
         long r = host_path(dirfd, path, 0, host);
         if (r < 0) return r;
         if (!(x[2] & 0x200 /* AT_REMOVEDIR */) && (r = l2s_unlinked(host)) < 0) return r;
-        return sys(NR_unlinkat, AT_FDCWD, host, x[2], 0);
+        r = sys(NR_unlinkat, AT_FDCWD, host, x[2], 0);
+        if (r != -EACCES || id(FSUID) != 0) return r;
+        /* Root removes from read-only directories too (rm -rf of Go's module cache). */
+        long slash = length_of(host);
+        while (slash > 0 && host[slash] != '/') slash--;
+        if (slash == 0) return r;
+        host[slash] = 0;
+        struct kstat st;
+        if (sys(NR_newfstatat, AT_FDCWD, host, &st, 0) < 0 || st.uid != cfg.real_uid || (st.mode & 0300) == 0300 ||
+            sys(NR_fchmodat, AT_FDCWD, host, (st.mode & 07777) | 0300, 0) < 0)
+            return r;
+        host[slash] = '/';
+        r = sys(NR_unlinkat, AT_FDCWD, host, x[2], 0);
+        host[slash] = 0;
+        sys(NR_fchmodat, AT_FDCWD, host, st.mode & 07777, 0);
+        return r;
     }
     case NR_symlinkat: {
         dirfd = (long) (int) x[1];
