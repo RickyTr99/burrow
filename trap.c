@@ -25,6 +25,7 @@ static const uint16_t trapped[] = {
     NR_setfsuid, NR_setfsgid, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
     NR_sendto,
+    NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
 };
 
 struct sock_filter {
@@ -708,7 +709,7 @@ static long emulate(long nr, const uint64_t* x) {
     return -ENOSYS;
 }
 
-static void on_sigsys(int sig, struct ksiginfo* info, struct kucontext* uc) {
+static __attribute__((noinline)) void on_sigsys(int sig, struct ksiginfo* info, struct kucontext* uc) {
     if (info->code != SYS_SECCOMP || info->errno_ != TRAP_DATA) {
         foreign(sig, info, uc);
         return;
@@ -717,7 +718,74 @@ static void on_sigsys(int sig, struct ksiginfo* info, struct kucontext* uc) {
     x[0] = (uint64_t) emulate(info->syscall, x);
 }
 
+/* The handler needs tens of KB, more than the signal stacks guests set up
+ * (Firefox's threads: 20 KB), so it runs on one of these, owned by a thread id.
+ * The stack is also the thread's sigaltstack meanwhile: a nested signal (a
+ * trapped syscall in a guest SIGSYS handler) must go below it, not at the top
+ * of the guest's sigaltstack, where the outer frame lives. */
+#define STACKS 32
+#define STACK_SIZE (128 * 1024)
+static char* stacks;
+static int stack_owner[STACKS];
+
+extern void burrow_call_on_stack(long a, void* b, void* c, void* fn, char* top);
+
+static int claim_stack(void) {
+    int tid = (int) sys(NR_gettid, 0, 0, 0, 0);
+    for (int pass = 0; stacks != 0 && pass < 2; pass++) {
+        for (int i = 0; i < STACKS; i++) {
+            int free_slot = 0;
+            if (__atomic_compare_exchange_n(&stack_owner[i], &free_slot, tid, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                return i;
+        }
+        /* Owners gone: the parent's threads after a fork, a vfork child that
+         * exec'd. shortcut: a live CLONE_VM child of another process can lose
+         * its stack here, only when all are taken. */
+        long pid = sys(NR_getpid, 0, 0, 0, 0);
+        for (int i = 0; i < STACKS; i++) {
+            int owner = __atomic_load_n(&stack_owner[i], __ATOMIC_RELAXED);
+            if (owner != 0 && sys(NR_tgkill, pid, owner, 0, 0) == -ESRCH)
+                __atomic_compare_exchange_n(&stack_owner[i], &owner, 0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        }
+    }
+    return -1;
+}
+
+static void on_sigsys_entry(int sig, struct ksiginfo* info, struct kucontext* uc) {
+    struct {
+        void* sp;
+        int flags;
+        size_t size;
+    } ours, old;
+    int slot = claim_stack();
+    if (slot >= 0) {
+        ours.sp = stacks + (long) slot * STACK_SIZE;
+        ours.flags = 0;
+        ours.size = STACK_SIZE;
+        /* EPERM when already on the guest's sigaltstack: stay there. */
+        if (sys(NR_sigaltstack, &ours, &old, 0, 0) < 0) {
+            __atomic_store_n(&stack_owner[slot], 0, __ATOMIC_RELEASE);
+            slot = -1;
+        }
+    }
+    if (slot < 0) {
+        on_sigsys(sig, info, uc);
+        return;
+    }
+    burrow_call_on_stack(sig, info, uc, (void*) on_sigsys, (char*) ours.sp + STACK_SIZE);
+    old.flags &= ~1; /* SS_ONSTACK, reported only */
+    sys(NR_sigaltstack, &old, 0, 0, 0);
+    __atomic_store_n(&stack_owner[slot], 0, __ATOMIC_RELEASE);
+}
+
 void install_handler(void) {
-    struct ksigaction act = {(uintptr_t) on_sigsys, SA_SIGINFO | SA_ONSTACK | SA_NODEFER, 0, 0};
+    long p = sys6(NR_mmap, 0, (long) STACKS * STACK_SIZE, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    stacks = p < 0 && p > -4096 ? 0 : (char*) p;
+    /* Not SA_ONSTACK: the kernel's frame goes on the thread's stack, as the
+     * guest's sigaltstack may be too small for it and the handler both.
+     * shortcut: goroutine stacks are small too; Go programs would need
+     * SA_ONSTACK with a sigaltstack of ours. */
+    struct ksigaction act = {(uintptr_t) on_sigsys_entry, SA_SIGINFO | SA_NODEFER, 0, 0};
     if (sys(NR_rt_sigaction, SIGSYS, &act, 0, 8) < 0) die("cannot install the SIGSYS handler", 0);
 }

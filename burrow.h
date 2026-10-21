@@ -48,17 +48,17 @@ enum {
     NR_statfs = 43, NR_truncate = 45, NR_faccessat = 48, NR_chdir = 49, NR_fchmodat = 53, NR_fchownat = 54,
     NR_fchown = 55, NR_openat = 56, NR_close = 57, NR_read = 63, NR_write = 64, NR_pread64 = 67,
     NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80, NR_utimensat = 88, NR_exit_group = 94,
-    NR_tgkill = 131, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_setregid = 143, NR_setgid = 144,
+    NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
     NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_setgroups = 159, NR_prctl = 167,
     NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
     NR_bind = 200, NR_connect = 203, NR_sendto = 206, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
-    NR_faccessat2 = 439, NR_fchmodat2 = 452, NR_process_vm_readv = 270,
+    NR_clone3 = 435, NR_faccessat2 = 439, NR_fchmodat2 = 452, NR_process_vm_readv = 270,
 };
 
 enum {
-    EPERM = 1, ENOENT = 2, EINTR = 4, EIO = 5, E2BIG = 7, ENOEXEC = 8, EBADF = 9, ENOMEM = 12, EACCES = 13,
+    EPERM = 1, ENOENT = 2, ESRCH = 3, EINTR = 4, EIO = 5, E2BIG = 7, ENOEXEC = 8, EBADF = 9, ENOMEM = 12, EACCES = 13,
     EFAULT = 14, ENOTDIR = 20, EISDIR = 21, EINVAL = 22, ERANGE = 34, ENAMETOOLONG = 36, ENOSYS = 38,
     ELOOP = 40,
 };
@@ -90,6 +90,7 @@ enum {
 #define MAP_PRIVATE 0x02
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
+#define MAP_NORESERVE 0x4000
 #define SIGSYS 31
 #define SYS_SECCOMP 1
 #define SA_SIGINFO 0x4

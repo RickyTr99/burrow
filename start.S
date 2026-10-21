@@ -19,6 +19,18 @@ burrow_gadget:
     svc #0
     ret
 
+// burrow_call_on_stack(a, b, c, fn, top): fn(a, b, c) on the stack ending at top.
+    .globl burrow_call_on_stack
+    .type burrow_call_on_stack, %function
+burrow_call_on_stack:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov sp, x4
+    blr x3
+    mov sp, x29
+    ldp x29, x30, [sp], #16
+    ret
+
 // burrow_jump(entry, sp): starts the guest on the stack the kernel built.
     .globl burrow_jump
     .type burrow_jump, %function
