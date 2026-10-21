@@ -23,7 +23,8 @@ static const uint16_t trapped[] = {
     NR_openat, NR_readlinkat, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
-    NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2,
+    NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
+    NR_sendto,
 };
 
 struct sock_filter {
@@ -42,7 +43,7 @@ struct sock_filter {
 
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 2];
+    struct sock_filter f[10 + N_TRAPPED + 7];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -55,9 +56,15 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 0}; /* nr */
     for (unsigned t = 0; t < N_TRAPPED; t++)
-        f[i++] = (struct sock_filter){JEQ, (uint8_t) (N_TRAPPED - t), 0, trapped[t]};
+        f[i++] = (struct sock_filter){JEQ, (uint8_t) (N_TRAPPED - t + 1), 0, trapped[t]};
+    /* getsockopt(), only for SO_PEERCRED: the ids it reports are real. */
+    f[i++] = (struct sock_filter){JEQ, 2, 0, NR_getsockopt};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 1, 17 /* SO_PEERCRED */};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     struct {
         unsigned short len;
         struct sock_filter* filter;
@@ -160,7 +167,24 @@ static long do_sigprocmask(long how, const uint64_t* set, uint64_t* old, long si
  * Android's, or a kill(). */
 static void foreign(int sig, struct ksiginfo* info, struct kucontext* uc) {
     uintptr_t h = guest_sigsys.handler;
-    if (h > 1) {
+    if (info->code == SYS_SECCOMP && info->errno_ == 0) {
+        /* Android's app policy traps with a bare SECCOMP_RET_TRAP. */
+        uint64_t* x = uc->mcontext.regs;
+        switch (info->syscall) {
+        case 202: /* accept: apps must use accept4 (Xwayland does not) */
+            x[0] = (uint64_t) sys(242 /* accept4 */, x[0], x[1], x[2], 0);
+            break;
+        case 39:  /* umount2 */
+        case 40:  /* mount */
+        case 41:  /* pivot_root */
+        case 97:  /* unshare */
+        case 268: /* setns: as proot, pretend (sandbox helpers carry on) */
+            x[0] = 0;
+            break;
+        default: /* clone3 (glibc falls back to clone), SysV IPC... */
+            x[0] = (uint64_t) -ENOSYS;
+        }
+    } else if (h > 1) {
         if (guest_sigsys.flags & SA_SIGINFO) {
             ((void (*)(int, struct ksiginfo*, struct kucontext*)) h)(sig, info, uc);
         } else {
@@ -300,6 +324,116 @@ static long do_socket_path(long nr, long fd, const char* addr, long length) {
     un.family = AF_UNIX;
     memcpy(un.path, host, h + 1);
     return sys(nr, fd, &un, 2 + h + 1, 0);
+}
+
+/* A Unix socket address with its path translated into @un; 0 if none to translate. */
+static long socket_address(const char* addr, long length, void* un, long* un_length) {
+    struct sockaddr {
+        uint16_t family;
+        char path[108];
+    }* out = un;
+    if (addr == 0 || length <= 2 || *(const uint16_t*) addr != AF_UNIX || addr[2] == 0) return 0;
+    char path[109], host[PATH_MAX];
+    long n = length - 2 < 108 ? length - 2 : 108;
+    memcpy(path, addr + 2, n);
+    path[n] = 0;
+    long r = host_path(AT_FDCWD, path, 1, host);
+    if (r < 0) return r;
+    long h = length_of(host);
+    if (h >= 108) return -ENAMETOOLONG;
+    out->family = AF_UNIX;
+    memcpy(out->path, host, h + 1);
+    *un_length = 2 + h + 1;
+    return 1;
+}
+
+struct kmsghdr {
+    void* name;
+    uint32_t namelen;
+    void* iov;
+    size_t iovlen;
+    void* control;
+    size_t controllen;
+    int flags;
+};
+
+/* sendmsg(): SCM_CREDENTIALS must carry the real ids (D-Bus and X11 clients
+ * send their own, which are fake), and a datagram's destination path the
+ * host's. */
+static long do_sendmsg(long fd, const struct kmsghdr* m, long flags) {
+    struct kmsghdr copy;
+    char control[1024], un[110];
+    int changed = 0;
+    if (m != 0 && m->control != 0 && m->controllen >= 16 && m->controllen <= sizeof(control)) {
+        for (size_t at = 0; at + 16 <= m->controllen;) {
+            const char* c = (const char*) m->control + at;
+            size_t length = *(const size_t*) c;
+            if (length < 16 || at + length > m->controllen) break;
+            if (*(const int*) (c + 8) == 1 /* SOL_SOCKET */ && *(const int*) (c + 12) == 2 /* SCM_CREDENTIALS */ &&
+                length >= 16 + 12) {
+                if (!changed) {
+                    memcpy(control, m->control, m->controllen);
+                    copy = *m;
+                    copy.control = control;
+                    changed = 1;
+                }
+                uint32_t* cred = (uint32_t*) (control + at + 16); /* pid, uid, gid */
+                cred[1] = cfg.real_uid;
+                cred[2] = cfg.real_gid;
+            }
+            at += (length + 7) & ~(size_t) 7;
+        }
+    }
+    if (m != 0 && m->name != 0) {
+        long un_length;
+        long r = socket_address(m->name, m->namelen, un, &un_length);
+        if (r < 0) return r;
+        if (r > 0) {
+            if (!changed) copy = *m, changed = 1;
+            copy.name = un;
+            copy.namelen = (uint32_t) un_length;
+        }
+    }
+    return sys(NR_sendmsg, fd, changed ? &copy : m, flags, 0);
+}
+
+static long do_sendto(const uint64_t* x) {
+    char un[110];
+    long un_length;
+    long r = socket_address((const char*) x[4], (long) x[5], un, &un_length);
+    if (r < 0) return r;
+    if (r == 0) return sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) x[4], (long) x[5]);
+    return sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) un, un_length);
+}
+
+/* The emulated ids of Burrow process @pid, read where Burrow keeps them:
+ * its image is at the same address in every process. */
+static int peer_ids(long pid, uint32_t* ids) {
+    char link[48] = "/proc/", exe[512];
+    char* end = format_unsigned(link + 6, (unsigned long) pid);
+    memcpy(end, "/exe", 5);
+    long n = sys(NR_readlinkat, AT_FDCWD, link, exe, sizeof(exe) - 1);
+    if (n <= 0) return 0;
+    exe[n] = 0;
+    if (!same(exe, cfg.self)) return 0;
+    struct {
+        void* base;
+        size_t length;
+    } local = {ids, sizeof(cfg.ids)}, remote = {cfg.ids, sizeof(cfg.ids)};
+    return sys6(NR_process_vm_readv, pid, (long) &local, 1, (long) &remote, 1, 0) == (long) sizeof(cfg.ids);
+}
+
+/* getsockopt(SO_PEERCRED): the peer's real ids become its fake ones, root's
+ * when they cannot be read. */
+static long do_peercred(const uint64_t* x) {
+    long r = sys6(NR_getsockopt, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) x[4], 0);
+    if (r < 0 || x[1] != 1 /* SOL_SOCKET */ || x[4] == 0 || *(const uint32_t*) x[4] < 12) return r;
+    uint32_t* cred = (uint32_t*) x[3]; /* pid, uid, gid */
+    uint32_t ids[ID_COUNT];
+    int known = peer_ids(cred[0], ids);
+    if (cred[1] == cfg.real_uid) cred[1] = known ? ids[EUID] : 0;
+    if (cred[2] == cfg.real_gid) cred[2] = known ? ids[EGID] : 0;
+    return r;
 }
 
 /* -- execve ------------------------------------------------------------------------------ */
@@ -442,6 +576,10 @@ static long emulate(long nr, const uint64_t* x) {
     switch (nr) {
     case NR_openat: {
         long flags = (long) x[2];
+        /* An O_TMPFILE file gets its name from linkat(), which Android
+         * refuses: say it is unsupported, so programs (Qt's QTemporaryFile,
+         * glibc's tmpfile()) fall back to a named file. */
+        if (flags & 020000000 /* __O_TMPFILE */) return -95 /* EOPNOTSUPP */;
         int follow = !(flags & O_NOFOLLOW) && (flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
         ON_HOST(follow, sys(NR_openat, AT_FDCWD, host, flags, x[3]));
     }
@@ -538,6 +676,9 @@ static long emulate(long nr, const uint64_t* x) {
         ON_HOST(!(x[2] & IN_DONT_FOLLOW), sys(NR_inotify_add_watch, x[0], host, x[2], 0));
     case NR_bind:
     case NR_connect: return do_socket_path(nr, (long) x[0], (const char*) x[1], (long) x[2]);
+    case NR_sendmsg: return do_sendmsg((long) x[0], (const struct kmsghdr*) x[1], (long) x[2]);
+    case NR_sendto: return do_sendto(x);
+    case NR_getsockopt: return do_peercred(x);
     case NR_execve:
         return emulate_execve(AT_FDCWD, (const char*) x[0], (char* const*) x[1], (char* const*) x[2], 0);
     case NR_execveat:

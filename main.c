@@ -3,6 +3,11 @@
  * environment, the launcher otherwise:
  *
  *   libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [--] PROGRAM [ARG]...
+ *
+ * The launcher stays as the parent of the guest's process tree, like proot
+ * with --kill-on-exit: when the program exits, or the launcher gets SIGTERM
+ * (Process.destroy()), it kills what is left of the tree and exits with the
+ * program's status.
  */
 
 #include "burrow.h"
@@ -45,6 +50,113 @@ static long fd_path(long fd, char* out, long size) {
     return n;
 }
 
+/* -- Supervisor ---------------------------------------------------------------- */
+
+#define NR_getdents64 61
+#define NR_kill 129
+#define NR_clone 220
+#define NR_wait4 260
+#define SIGKILL 9
+#define SIGCHLD 17
+#define PR_SET_CHILD_SUBREAPER 36
+#define MAX_PROCESSES 4096
+
+static volatile int stop_requested;
+static long main_child = -1;
+static int main_status = -1; /* its wait status, once reaped */
+
+static void reaped(long pid, int status) {
+    if (pid == main_child) main_status = status;
+}
+
+static void on_stop(int sig) {
+    (void) sig;
+    stop_requested = 1;
+}
+
+/* The parent of process @pid, from /proc/<pid>/stat, or -1. */
+static long parent_of(long pid) {
+    char path[48] = "/proc/", buf[512];
+    char* end = format_unsigned(path + 6, (unsigned long) pid);
+    memcpy(end, "/stat", 6);
+    long fd = sys(NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    long n = sys(NR_read, fd, buf, sizeof(buf) - 1, 0);
+    sys(NR_close, fd, 0, 0, 0);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    /* "pid (comm) state ppid ...": comm may hold anything, ")" included. */
+    long close_paren = -1;
+    for (long i = 0; i < n; i++)
+        if (buf[i] == ')') close_paren = i;
+    if (close_paren < 0 || close_paren + 4 >= n) return -1;
+    const char* p = buf + close_paren + 4;
+    return (long) parse_unsigned(&p);
+}
+
+/* Kills every process below this one. Orphans come back to us as their
+ * subreaper, so each one's chain of parents ends here. */
+static void kill_tree(void) {
+    static int pids[MAX_PROCESSES], parents[MAX_PROCESSES];
+    static unsigned char mine[MAX_PROCESSES];
+    long self = sys(NR_getpid, 0, 0, 0, 0);
+    for (int round = 0; round < 100; round++) {
+        long dir = sys(NR_openat, AT_FDCWD, "/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+        if (dir < 0) return;
+        int count = 0;
+        char entries[4096];
+        long n;
+        while ((n = sys(NR_getdents64, dir, entries, sizeof(entries), 0)) > 0) {
+            for (long at = 0; at < n;) {
+                uint16_t length = *(uint16_t*) (entries + at + 16);
+                const char* name = entries + at + 19;
+                at += length;
+                if (name[0] < '1' || name[0] > '9' || count == MAX_PROCESSES) continue;
+                long pid = (long) parse_unsigned(&name);
+                long parent = parent_of(pid);
+                if (parent < 0) continue;
+                pids[count] = (int) pid;
+                parents[count] = (int) parent;
+                mine[count] = 0;
+                count++;
+            }
+        }
+        sys(NR_close, dir, 0, 0, 0);
+        for (int changed = 1; changed;) {
+            changed = 0;
+            for (int i = 0; i < count; i++) {
+                if (mine[i]) continue;
+                int below = parents[i] == self;
+                for (int j = 0; j < count && !below; j++) below = mine[j] && pids[j] == parents[i];
+                if (below) mine[i] = 1, changed = 1;
+            }
+        }
+        int killed = 0;
+        for (int i = 0; i < count; i++)
+            if (mine[i] && sys(NR_kill, pids[i], SIGKILL, 0, 0) == 0) killed++;
+        int status;
+        long pid;
+        while ((pid = sys(NR_wait4, -1, &status, 1 /* WNOHANG */, 0)) > 0) reaped(pid, status);
+        if (killed == 0) return;
+    }
+}
+
+static __attribute__((noreturn)) void supervise(long child) {
+    main_child = child;
+    while (main_status < 0) {
+        int status;
+        long r = sys(NR_wait4, -1, &status, 0, 0);
+        if (r > 0) reaped(r, status);
+        else if (r == -EINTR && stop_requested) kill_tree();
+        else if (r != -EINTR) break; /* ECHILD */
+    }
+    kill_tree();
+    int s = main_status;
+    int code = s < 0 ? 1 : (s & 0x7f) == 0 ? (s >> 8) & 0xff : 128 + (s & 0x7f);
+    sys(NR_exit_group, code, 0, 0, 0);
+    __builtin_unreachable();
+}
+
 static void launch(long argc, char** argv, char** envp) {
     const char* root = 0;
     const char* workdir = "/";
@@ -77,6 +189,16 @@ static void launch(long argc, char** argv, char** envp) {
     char host[PATH_MAX];
     long r = host_path(AT_FDCWD, workdir, 1, host);
     if (r < 0 || sys(NR_chdir, host, 0, 0, 0) < 0) die("cannot enter ", workdir);
+
+    sys(NR_prctl, PR_SET_CHILD_SUBREAPER, 1, 0, 0);
+    struct ksigaction stop = {(uintptr_t) on_stop, 0, 0, 0};
+    const int stop_signals[] = {1 /* SIGHUP */, 2 /* SIGINT */, 15 /* SIGTERM */};
+    for (int s = 0; s < 3; s++) sys(NR_rt_sigaction, stop_signals[s], &stop, 0, 8);
+    long child = sys6(NR_clone, SIGCHLD, 0, 0, 0, 0, 0);
+    if (child < 0) die("cannot fork", 0);
+    if (child > 0) supervise(child);
+    struct ksigaction dfl = {0, 0, 0, 0};
+    for (int s = 0; s < 3; s++) sys(NR_rt_sigaction, stop_signals[s], &dfl, 0, 8);
 
     install_handler();
     r = install_filter();
