@@ -647,6 +647,7 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     long l = 0;
     while (b[l] && b[l] != '/' && l < 15) name[l] = b[l], l++;
     name[l] = 0;
+    uint32_t set_ids_mode = 0; /* S_ISUID and S_ISGID of the file itself (scripts' are ignored, as by Linux) */
     for (int depth = 0;; depth++) {
         r = to_host(guest, !(flags & AT_SYMLINK_NOFOLLOW), host, resolved);
         if (r < 0) return r;
@@ -654,6 +655,7 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
         r = sys(NR_newfstatat, AT_FDCWD, host, &st, 0);
         if (r < 0) return r;
         if ((st.mode & S_IFMT) != S_IFREG) return -EACCES;
+        if (depth == 0) set_ids_mode = st.mode & (S_ISUID | S_ISGID);
         r = sys(NR_faccessat, AT_FDCWD, host, X_OK, 0);
         if (r < 0) return r;
         long fd = sys(NR_openat, AT_FDCWD, host, O_RDONLY | O_CLOEXEC, 0);
@@ -683,6 +685,7 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
         flags &= ~AT_SYMLINK_NOFOLLOW;
         r = guest_absolute(AT_FDCWD, interpreter, guest);
         if (r < 0) return r;
+        set_ids_mode = 0;
     }
 
     long argc = 0, envc = 0;
@@ -696,7 +699,15 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     if (block == 0) return -ENOMEM;
     char* state = (char*) (block + words);
     memcpy(state, "BURROW=", 7);
+    /* Set-user-ID and set-group-ID programs (sudo, su): every file is the
+     * app's, shown as root's to root, so they take root's ids. The old ids
+     * come back if the execve() fails. */
+    uint32_t old_ids[ID_COUNT];
+    for (int i = 0; i < ID_COUNT; i++) old_ids[i] = id(i);
+    if (set_ids_mode & S_ISUID) set_id(EUID, 0), set_id(SUID, 0), set_id(FSUID, 0);
+    if (set_ids_mode & S_ISGID) set_id(EGID, 0), set_id(SGID, 0), set_id(FSGID, 0);
     r = encode_config(state + 7, state_size - 7, resolved, host, name);
+    for (int i = 0; i < ID_COUNT; i++) set_id(i, old_ids[i]);
     if (r < 0) {
         sys(NR_munmap, block, size, 0, 0);
         return r;
@@ -723,6 +734,7 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
  * refused a file of the app's, it gets the permission it lacks for the time
  * of the open, as proot lends u+rw. */
 static long open_as_root(long nr, const char* host, long flags, long a, long b) {
+    if (!(flags & O_PATH) && proc_maps(host)) return proc_maps_open(host, flags);
     long r = sys(nr, AT_FDCWD, host, a, b);
     int proc = r == -EACCES && !(flags & O_PATH) ? proc_file(host) : -1;
     if (proc >= 0) return proc_open(proc, flags);

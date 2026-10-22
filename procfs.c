@@ -164,6 +164,75 @@ long proc_open(int which, long flags) {
     return fd;
 }
 
+/* /proc/<pid>/maps names the rootfs' files by their host paths: their guest
+ * paths instead (VLC finds its plugins from libvlccore's, gdb its libraries). */
+int proc_maps(const char* host) {
+    long n = length_of(host);
+    return n > 11 && starts_with(host, "/proc/") && same(host + n - 5, "/maps");
+}
+
+struct output {
+    long fd, used;
+    char buf[8192];
+};
+
+static void out_put(struct output* o, const char* s, long n) {
+    if (o->used + n > (long) sizeof(o->buf)) {
+        sys(NR_write, o->fd, o->buf, o->used, 0);
+        o->used = 0;
+    }
+    if (n > (long) sizeof(o->buf)) {
+        sys(NR_write, o->fd, s, n, 0);
+        return;
+    }
+    memcpy(o->buf + o->used, s, n);
+    o->used += n;
+}
+
+/* One line of maps, its path (after the first '/': addresses have none) as the guest's. */
+static void maps_line(struct output* o, char* line, long n, char* guest) {
+    long at = 0;
+    while (at < n && line[at] != '/') at++;
+    out_put(o, line, at);
+    if (at < n) {
+        line[n] = 0;
+        long g = host_to_guest(line + at, guest, PATH_MAX);
+        if (g >= 0) out_put(o, guest, g);
+        else out_put(o, line + at, n - at);
+    }
+    out_put(o, "\n", 1);
+}
+
+long proc_maps_open(const char* host, long flags) {
+    if ((flags & 3) != O_RDONLY) return -EACCES;
+    long in = sys(NR_openat, AT_FDCWD, host, O_RDONLY | O_CLOEXEC, 0);
+    if (in < 0) return in;
+    struct output o;
+    o.used = 0;
+    o.fd = sys(NR_memfd_create, "maps", (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0, 0, 0);
+    if (o.fd < 0) {
+        sys(NR_close, in, 0, 0, 0);
+        return o.fd;
+    }
+    char buf[4096], line[PATH_MAX + 128], guest[PATH_MAX];
+    long used = 0, n;
+    while ((n = sys(NR_read, in, buf, sizeof(buf), 0)) > 0) {
+        for (long i = 0; i < n; i++) {
+            if (buf[i] == '\n') {
+                maps_line(&o, line, used, guest);
+                used = 0;
+            } else if (used < (long) sizeof(line) - 1) {
+                line[used++] = buf[i];
+            }
+        }
+    }
+    if (used > 0) maps_line(&o, line, used, guest);
+    sys(NR_write, o.fd, o.buf, o.used, 0);
+    sys(NR_close, in, 0, 0, 0);
+    sys(NR_lseek, o.fd, 0, 0 /* SEEK_SET */, 0);
+    return o.fd;
+}
+
 /* /proc's files show as empty, read-only and root's. */
 long proc_stat(struct kstat* st) {
     long fd = sys(NR_memfd_create, "stat", MFD_CLOEXEC, 0, 0);

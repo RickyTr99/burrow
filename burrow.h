@@ -80,6 +80,8 @@ enum {
 #define S_IFMT 0170000
 #define S_IFLNK 0120000
 #define S_IFREG 0100000
+#define S_ISUID 04000
+#define S_ISGID 02000
 #define S_IFDIR 0040000
 #define STATX_UID 0x8u
 #define STATX_GID 0x10u
@@ -248,6 +250,8 @@ long emulate_sysv(long nr, const uint64_t* x);
 /* procfs.c: the files of /proc that Android refuses, made up. */
 int proc_file(const char* host); /* its index, -1 if none */
 long proc_open(int which, long flags);
+int proc_maps(const char* host); /* 1 for /proc/<pid>/maps */
+long proc_maps_open(const char* host, long flags);
 long proc_stat(struct kstat* st);
 long proc_statx(struct kstatx* stx);
 
