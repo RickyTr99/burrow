@@ -24,7 +24,7 @@ static const uint16_t trapped[] = {
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
-    NR_sendto, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt,
+    NR_sendto, NR_recvfrom, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt,
     NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
 };
 
@@ -397,10 +397,26 @@ static long socket_address(const char* addr, long length, int follow, void* un, 
     return 1;
 }
 
-/* bind() and connect() on a Unix socket path. */
+/* The guest's nameserver, 127.0.0.53:53, becomes the app's DNS proxy
+ * (DnsProxy.kt) in @out: Android's resolver answers. */
+static int dns_address(const char* addr, long length, char* out) {
+    static const char nameserver[6] = {0, 53, 127, 0, 0, 53}; /* port and address, big-endian */
+    if (cfg.dns_port == 0 || addr == 0 || length < 8 || *(const uint16_t*) addr != AF_INET ||
+        memcmp(addr + 2, nameserver, 6) != 0)
+        return 0;
+    memset(out, 0, 16);
+    memcpy(out, addr, 2);
+    out[2] = (char) (cfg.dns_port >> 8);
+    out[3] = (char) cfg.dns_port;
+    out[4] = 127, out[7] = 1;
+    return 1;
+}
+
+/* bind() on a Unix socket path, connect() on one or to the nameserver. */
 static long do_socket_path(long nr, long fd, const char* addr, long length) {
     char un[110];
     long un_length, dir;
+    if (nr == NR_connect && dns_address(addr, length, un)) return sys(nr, fd, un, 16, 0);
     long r = socket_address(addr, length, nr == NR_connect, un, &un_length, &dir);
     if (r < 0) return r;
     if (r == 0) return sys(nr, fd, addr, length, 0);
@@ -447,7 +463,11 @@ static long do_sendmsg(long fd, const struct kmsghdr* m, long flags) {
             at += (length + 7) & ~(size_t) 7;
         }
     }
-    if (m != 0 && m->name != 0) {
+    if (m != 0 && m->name != 0 && dns_address(m->name, m->namelen, un)) {
+        if (!changed) copy = *m, changed = 1;
+        copy.name = un;
+        copy.namelen = 16;
+    } else if (m != 0 && m->name != 0) {
         long un_length;
         long r = socket_address(m->name, m->namelen, 1, un, &un_length, &dir);
         if (r < 0) return r;
@@ -465,11 +485,30 @@ static long do_sendmsg(long fd, const struct kmsghdr* m, long flags) {
 static long do_sendto(const uint64_t* x) {
     char un[110];
     long un_length, dir;
+    if (dns_address((const char*) x[4], (long) x[5], un))
+        return sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) un, 16);
     long r = socket_address((const char*) x[4], (long) x[5], 1, un, &un_length, &dir);
     if (r < 0) return r;
     if (r == 0) return sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) x[4], (long) x[5]);
     r = sys6(NR_sendto, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) un, un_length);
     if (dir >= 0) sys(NR_close, dir, 0, 0, 0);
+    return r;
+}
+
+/* recvfrom(): answers of the DNS proxy come from the nameserver, else
+ * resolvers (glibc's, c-ares) drop them. */
+static long do_recvfrom(const uint64_t* x) {
+    long r = sys6(NR_recvfrom, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) x[4], (long) x[5]);
+    char* from = (char*) x[4];
+    if (r < 0 || cfg.dns_port == 0 || from == 0 || x[5] == 0 || *(const uint32_t*) x[5] < 8 ||
+        *(const uint16_t*) from != AF_INET)
+        return r;
+    static const char proxy_address[4] = {127, 0, 0, 1};
+    if ((((unsigned char) from[2] << 8) | (unsigned char) from[3]) == cfg.dns_port &&
+        memcmp(from + 4, proxy_address, 4) == 0) {
+        from[2] = 0, from[3] = 53;
+        from[7] = 53;
+    }
     return r;
 }
 
@@ -788,6 +827,7 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_connect: return do_socket_path(nr, (long) x[0], (const char*) x[1], (long) x[2]);
     case NR_sendmsg: return do_sendmsg((long) x[0], (const struct kmsghdr*) x[1], (long) x[2]);
     case NR_sendto: return do_sendto(x);
+    case NR_recvfrom: return do_recvfrom(x);
     case NR_getsockopt: return do_peercred(x);
     case NR_shmget:
     case NR_shmctl:

@@ -2,7 +2,7 @@
  * Entry point: the loader of an emulated execve() when BURROW is in the
  * environment, the launcher otherwise:
  *
- *   libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [--] PROGRAM [ARG]...
+ *   libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [--] PROGRAM [ARG]...
  *
  * The launcher stays as the parent of the guest's process tree, like proot
  * with --kill-on-exit: when the program exits, or the launcher gets SIGTERM
@@ -172,9 +172,15 @@ static void launch(long argc, char** argv, char** envp) {
         if (same(a, "-r")) root = argv[++i];
         else if (same(a, "-b")) add_bind(argv[++i]);
         else if (same(a, "-w")) workdir = argv[++i];
+        else if (same(a, "-d")) {
+            const char* p = argv[++i];
+            unsigned long port = parse_unsigned(&p);
+            if (*p || port == 0 || port > 65535) die("bad DNS port ", argv[i]);
+            cfg.dns_port = (uint16_t) port;
+        }
         else die("unknown option ", a);
     }
-    if (root == 0 || i >= argc) die("usage: libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] PROGRAM [ARG]...", 0);
+    if (root == 0 || i >= argc) die("usage: libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] [-d DNS_PORT] PROGRAM [ARG]...", 0);
 
     long fd = sys(NR_openat, AT_FDCWD, root, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
     if (fd < 0 || (cfg.root_length = fd_path(fd, cfg.root, sizeof(cfg.root))) <= 1) die("cannot open the rootfs ", root);
