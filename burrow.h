@@ -35,6 +35,7 @@
 
 #define PATH_MAX 4096
 #define MAX_BINDS 16
+#define MAX_GROUPS 32
 /* SECCOMP_RET_DATA of Burrow's filter, seen as si_errno: tells our traps
  * from those of the guest's own filters and of Android's. */
 #define TRAP_DATA 0x0b07
@@ -50,7 +51,7 @@ enum {
     NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80, NR_utimensat = 88, NR_exit_group = 94,
     NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
-    NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_setgroups = 159, NR_prctl = 167,
+    NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159, NR_prctl = 167,
     NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
     NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
@@ -181,6 +182,8 @@ struct config {
     int bind_count;
     uint32_t real_uid, real_gid;
     uint32_t ids[ID_COUNT]; /* the guest's, emulated; atomic */
+    uint32_t groups[MAX_GROUPS]; /* its supplementary groups, emulated */
+    int group_count;
     char exe[PATH_MAX];      /* the guest program, as a guest path */
     char host_exe[PATH_MAX]; /* and as a host path */
     char name[16];           /* its process name: the file execve() was given */

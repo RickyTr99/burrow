@@ -22,7 +22,7 @@ static const uint16_t trapped[] = {
     NR_linkat, NR_renameat, NR_statfs, NR_truncate, NR_faccessat, NR_chdir, NR_fchmodat, NR_fchownat, NR_fchown,
     NR_openat, NR_readlinkat, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
-    NR_setfsuid, NR_setfsgid, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
+    NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
     NR_sendto, NR_recvfrom, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt,
     NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
@@ -852,7 +852,24 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_setresgid: return set_ids(RGID, (uint32_t) x[0], (uint32_t) x[1], (uint32_t) x[2], 3);
     case NR_setfsuid: return set_fs_id(RUID, (uint32_t) x[0]);
     case NR_setfsgid: return set_fs_id(RGID, (uint32_t) x[0]);
-    case NR_setgroups: return id(EUID) == 0 ? 0 : -EPERM;
+    case NR_getgroups: {
+        long size = (long) (int) x[0];
+        if (size == 0) return cfg.group_count;
+        if (size < cfg.group_count) return -EINVAL;
+        if (x[1] == 0) return -EFAULT;
+        memcpy((uint32_t*) x[1], cfg.groups, cfg.group_count * sizeof(uint32_t));
+        return cfg.group_count;
+    }
+    case NR_setgroups: {
+        long size = (long) x[0];
+        if (id(EUID) != 0) return -EPERM;
+        /* shortcut: more groups than MAX_GROUPS fail; raise it if a program needs them. */
+        if (size < 0 || size > MAX_GROUPS) return -EINVAL;
+        if (size > 0 && x[1] == 0) return -EFAULT;
+        memcpy(cfg.groups, (const uint32_t*) x[1], size * sizeof(uint32_t));
+        cfg.group_count = (int) size;
+        return 0;
+    }
 
     case NR_rt_sigaction:
         return do_sigaction((long) x[0], (const struct ksigaction*) x[1], (struct ksigaction*) x[2], (long) x[3]);

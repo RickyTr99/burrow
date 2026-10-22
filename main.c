@@ -190,7 +190,8 @@ static void launch(long argc, char** argv, char** envp) {
         die("cannot find Burrow's own binary", 0);
     cfg.real_uid = (uint32_t) sys(NR_getuid, 0, 0, 0, 0);
     cfg.real_gid = (uint32_t) sys(NR_getgid, 0, 0, 0, 0);
-    /* ids[] start at 0: the guest is root. */
+    /* ids[] start at 0: the guest is root, in group root only. */
+    cfg.group_count = 1;
 
     char host[PATH_MAX];
     long r = host_path(AT_FDCWD, workdir, 1, host);
