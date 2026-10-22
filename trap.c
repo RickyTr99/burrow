@@ -327,6 +327,7 @@ static long do_stat(long dirfd, const char* path, struct kstat* st, long flags) 
         char host[PATH_MAX];
         r = host_path(dirfd, path, 0, host);
         if (r == 0) r = sys(NR_newfstatat, AT_FDCWD, host, st, AT_SYMLINK_NOFOLLOW);
+        if (r == -EACCES && proc_file(host) >= 0) r = proc_stat(st);
         if (r == 0 && (st->mode & S_IFMT) == S_IFLNK && !l2s_stat(host, st) && !(flags & AT_SYMLINK_NOFOLLOW)) {
             r = host_path(dirfd, path, 1, host);
             if (r == 0) r = sys(NR_newfstatat, AT_FDCWD, host, st, 0);
@@ -345,6 +346,7 @@ static long do_statx(long dirfd, const char* path, long flags, long mask, struct
         long nofollow = (flags & ~AT_EMPTY_PATH) | AT_SYMLINK_NOFOLLOW;
         r = host_path(dirfd, path, 0, host);
         if (r == 0) r = sys6(NR_statx, AT_FDCWD, (long) host, nofollow, mask | 1 /* STATX_TYPE */, (long) stx, 0);
+        if (r == -EACCES && proc_file(host) >= 0) r = proc_statx(stx);
         if (r == 0 && (stx->mode & S_IFMT) == S_IFLNK && !l2s_statx(host, nofollow, mask, stx) &&
             !(flags & AT_SYMLINK_NOFOLLOW)) {
             r = host_path(dirfd, path, 1, host);
@@ -680,6 +682,8 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
  * of the open, as proot lends u+rw. */
 static long open_as_root(long nr, const char* host, long flags, long a, long b) {
     long r = sys(nr, AT_FDCWD, host, a, b);
+    int proc = r == -EACCES && !(flags & O_PATH) ? proc_file(host) : -1;
+    if (proc >= 0) return proc_open(proc, flags);
     if (r != -EACCES || id(FSUID) != 0 || (flags & O_PATH)) return r;
     struct kstat st;
     if (sys(NR_newfstatat, AT_FDCWD, host, &st, 0) < 0 || st.uid != cfg.real_uid) return r;
@@ -688,6 +692,13 @@ static long open_as_root(long nr, const char* host, long flags, long a, long b) 
     if (sys(NR_fchmodat, AT_FDCWD, host, (st.mode & 07777) | need, 0) < 0) return r;
     r = sys(nr, AT_FDCWD, host, a, b);
     sys(NR_fchmodat, AT_FDCWD, host, st.mode & 07777, 0);
+    return r;
+}
+
+/* faccessat() of @host: the made-up files of /proc are readable. */
+static long access_host(long nr, const char* host, long mode, long flags) {
+    long r = sys(nr, AT_FDCWD, host, mode, flags);
+    if (r == -EACCES && !(mode & 3 /* W_OK | X_OK */) && proc_file(host) >= 0) return 0;
     return r;
 }
 
@@ -718,10 +729,10 @@ static long emulate(long nr, const uint64_t* x) {
         return r;
     }
     case NR_statx: return do_statx(dirfd, path, (long) x[2], (long) x[3], (struct kstatx*) x[4]);
-    case NR_faccessat: ON_HOST(1, sys(NR_faccessat, AT_FDCWD, host, x[2], 0));
+    case NR_faccessat: ON_HOST(1, access_host(NR_faccessat, host, (long) x[2], 0));
     case NR_faccessat2:
         if (empty(path) && (x[3] & AT_EMPTY_PATH)) return sys(NR_faccessat2, x[0], path, x[2], x[3]);
-        ON_HOST(!(x[3] & AT_SYMLINK_NOFOLLOW), sys(NR_faccessat2, AT_FDCWD, host, x[2], x[3]));
+        ON_HOST(!(x[3] & AT_SYMLINK_NOFOLLOW), access_host(NR_faccessat2, host, (long) x[2], (long) x[3]));
     case NR_readlinkat: return do_readlink(dirfd, path, (char*) x[2], (long) x[3]);
     case NR_getcwd: return do_getcwd((char*) x[0], (long) x[1]);
     case NR_chdir: {

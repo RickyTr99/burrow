@@ -245,6 +245,12 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
 /* sysv.c */
 long emulate_sysv(long nr, const uint64_t* x);
 
+/* procfs.c: the files of /proc that Android refuses, made up. */
+int proc_file(const char* host); /* its index, -1 if none */
+long proc_open(int which, long flags);
+long proc_stat(struct kstat* st);
+long proc_statx(struct kstatx* stx);
+
 /* l2s.c */
 int l2s_stat(const char* host, struct kstat* st);
 int l2s_statx(const char* host, long flags, long mask, struct kstatx* stx);
