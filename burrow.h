@@ -44,7 +44,7 @@
 
 enum {
     NR_setxattr = 5, NR_lsetxattr = 6, NR_getxattr = 8, NR_lgetxattr = 9, NR_listxattr = 11, NR_llistxattr = 12,
-    NR_removexattr = 14, NR_lremovexattr = 15, NR_getcwd = 17, NR_fcntl = 25, NR_inotify_add_watch = 27,
+    NR_removexattr = 14, NR_lremovexattr = 15, NR_getcwd = 17, NR_fcntl = 25, NR_ioctl = 29, NR_inotify_add_watch = 27,
     NR_mknodat = 33, NR_mkdirat = 34, NR_unlinkat = 35, NR_symlinkat = 36, NR_linkat = 37, NR_renameat = 38,
     NR_statfs = 43, NR_truncate = 45, NR_faccessat = 48, NR_chdir = 49, NR_fchmodat = 53, NR_fchownat = 54,
     NR_fchown = 55, NR_openat = 56, NR_close = 57, NR_read = 63, NR_write = 64, NR_pread64 = 67,

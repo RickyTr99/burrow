@@ -41,11 +41,12 @@ struct sock_filter {
 #define RET_TRAP 0x00030000u
 #define RET_ERRNO 0x00050000u
 #define AUDIT_ARCH_AARCH64 0xc00000b7u
+#define DRM_IOCTL_VERSION 0xc0406400u
 #define N_TRAPPED (sizeof(trapped) / sizeof(*trapped))
 
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 14];
+    struct sock_filter f[10 + N_TRAPPED + 19];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -70,13 +71,19 @@ long install_filter(void) {
     /* socket(AF_NETLINK, *, NETLINK_AUDIT): SELinux says EACCES, which PAM
      * takes for a broken audit system (su and sudo fail); a kernel without
      * audit says EPROTONOSUPPORT. */
-    f[i++] = (struct sock_filter){JEQ, 0, 4, NR_socket};
+    f[i++] = (struct sock_filter){JEQ, 0, 6, NR_socket};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 16}; /* args[0], low half */
     f[i++] = (struct sock_filter){JEQ, 0, 2, 16 /* AF_NETLINK */};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
     f[i++] = (struct sock_filter){JEQ, 1, 0, 9 /* NETLINK_AUDIT */};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 93 /* EPROTONOSUPPORT */};
+    /* ioctl(DRM_IOCTL_VERSION) only: the render node is KGSL, see do_drm_version(). */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_ioctl};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 1, DRM_IOCTL_VERSION};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     struct {
         unsigned short len;
         struct sock_filter* filter;
@@ -544,6 +551,41 @@ static long do_peercred(const uint64_t* x) {
     return r;
 }
 
+/* DRM_IOCTL_VERSION: the guest's render node is KGSL, which knows no DRM
+ * ioctl, and Chromium's GPU process dies without a version. KGSL answers as
+ * "kgsl": Mesa's loader is told its driver (zink), Turnip's msm probe skips
+ * any name but "msm". */
+static long do_drm_version(const uint64_t* x) {
+    long r = sys(NR_ioctl, x[0], x[1], x[2], 0);
+    if (r != -25 /* ENOTTY */ && r != -EINVAL) return r;
+    char link[32] = "/proc/self/fd/", target[32];
+    format_unsigned(link + 14, (unsigned long) (int) x[0]);
+    long n = sys(NR_readlinkat, AT_FDCWD, link, target, sizeof(target) - 1);
+    if (n < 0) return r;
+    target[n] = 0;
+    if (!same(target, "/dev/kgsl-3d0")) return r;
+    struct drm_version {
+        int major, minor, patchlevel;
+        size_t name_length;
+        char* name;
+        size_t date_length;
+        char* date;
+        size_t desc_length;
+        char* desc;
+    }* v = (struct drm_version*) x[2];
+    if (v == 0) return -EFAULT;
+    static const char* const strings[] = {"kgsl", "20260101", "Qualcomm KGSL (DroidNux)"};
+    size_t* lengths[] = {&v->name_length, &v->date_length, &v->desc_length};
+    char* buffers[] = {v->name, v->date, v->desc};
+    v->major = 1, v->minor = 0, v->patchlevel = 0;
+    for (int i = 0; i < 3; i++) {
+        size_t length = (size_t) length_of(strings[i]);
+        if (buffers[i] != 0) memcpy(buffers[i], strings[i], *lengths[i] < length ? *lengths[i] : length);
+        *lengths[i] = length;
+    }
+    return 0;
+}
+
 /* -- execve ------------------------------------------------------------------------------ */
 
 static void* map(long size) {
@@ -840,6 +882,7 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_sendto: return do_sendto(x);
     case NR_recvfrom: return do_recvfrom(x);
     case NR_getsockopt: return do_peercred(x);
+    case NR_ioctl: return do_drm_version(x);
     case NR_shmget:
     case NR_shmctl:
     case NR_shmat:
