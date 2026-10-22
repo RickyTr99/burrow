@@ -230,9 +230,36 @@ static int is_self_exe(const char* p) {
     return same(p, "/proc/self/exe") || same(p, "/proc/thread-self/exe");
 }
 
+/* The rest of @p after /proc/<pid>/root (self and thread-self too), "" if
+ * none; 0 if @p is no such path. */
+static const char* proc_root_rest(const char* p) {
+    if (!starts_with(p, "/proc/")) return 0;
+    const char* q = p + 6;
+    if (starts_with(q, "self/")) {
+        q += 5;
+    } else if (starts_with(q, "thread-self/")) {
+        q += 12;
+    } else {
+        const char* digits = q;
+        while (*q >= '0' && *q <= '9') q++;
+        if (q == digits || *q++ != '/') return 0;
+    }
+    if (!starts_with(q, "root") || (q[4] != 0 && q[4] != '/')) return 0;
+    return q + 4;
+}
+
 long to_host(const char* guest, int follow, char* host, char* resolved) {
     char scratch[PATH_MAX];
     if (resolved == 0) resolved = scratch;
+    /* A guest process's root is the rootfs, not Android's "/" (xdg-desktop-portal
+     * opens it to tell sandboxed apps). The link itself stays one: readlink()
+     * gives "/". shortcut: Android's own processes get the rootfs too. */
+    const char* rest = proc_root_rest(guest);
+    if (rest != 0 && (rest[0] != 0 || follow)) {
+        char from_root[PATH_MAX];
+        if (copy(from_root, PATH_MAX, rest[0] ? rest : "/") < 0) return -ENAMETOOLONG;
+        return to_host(from_root, follow, host, resolved);
+    }
     if (is_self_exe(guest) && follow) {
         long r = copy(host, PATH_MAX, cfg.host_exe);
         if (r >= 0) r = copy(resolved, PATH_MAX, cfg.exe);
