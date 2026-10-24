@@ -47,7 +47,7 @@ enum {
     NR_removexattr = 14, NR_lremovexattr = 15, NR_getcwd = 17, NR_fcntl = 25, NR_ioctl = 29, NR_inotify_add_watch = 27,
     NR_mknodat = 33, NR_mkdirat = 34, NR_unlinkat = 35, NR_symlinkat = 36, NR_linkat = 37, NR_renameat = 38,
     NR_statfs = 43, NR_truncate = 45, NR_faccessat = 48, NR_chdir = 49, NR_fchmodat = 53, NR_fchownat = 54,
-    NR_fchown = 55, NR_openat = 56, NR_close = 57, NR_read = 63, NR_write = 64, NR_pread64 = 67,
+    NR_fchown = 55, NR_openat = 56, NR_close = 57, NR_lseek = 62, NR_read = 63, NR_write = 64, NR_pread64 = 67,
     NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80, NR_utimensat = 88, NR_exit_group = 94,
     NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
@@ -250,6 +250,7 @@ long emulate_sysv(long nr, const uint64_t* x);
 /* procfs.c: the files of /proc that Android refuses, made up. */
 int proc_file(const char* host); /* its index, -1 if none */
 long proc_open(int which, long flags);
+void proc_rewind(long fd); /* lseek(fd, 0, SEEK_SET): a made-up file's content made again */
 int proc_maps(const char* host); /* 1 for /proc/<pid>/maps */
 long proc_maps_open(const char* host, long flags);
 long proc_stat(struct kstat* st);

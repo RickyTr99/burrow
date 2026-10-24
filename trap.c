@@ -46,7 +46,7 @@ struct sock_filter {
 
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 19];
+    struct sock_filter f[10 + N_TRAPPED + 26];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -66,6 +66,14 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
     f[i++] = (struct sock_filter){JEQ, 0, 1, 17 /* SO_PEERCRED */};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* lseek(fd, 0, SEEK_SET) only: made-up /proc files read again (proc_rewind()). */
+    f[i++] = (struct sock_filter){JEQ, 0, 6, NR_lseek};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, 0};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 1, 0 /* SEEK_SET */};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     /* socket(AF_NETLINK, *, NETLINK_AUDIT): SELinux says EACCES, which PAM
@@ -944,6 +952,10 @@ static long emulate(long nr, const uint64_t* x) {
         cfg.group_count = (int) size;
         return 0;
     }
+
+    case NR_lseek:
+        proc_rewind((long) x[0]);
+        return sys(NR_lseek, x[0], x[1], x[2], 0);
 
     case NR_rt_sigaction:
         return do_sigaction((long) x[0], (const struct ksigaction*) x[1], (struct ksigaction*) x[2], (long) x[3]);
