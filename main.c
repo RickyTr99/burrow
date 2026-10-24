@@ -206,6 +206,9 @@ static void launch(long argc, char** argv, char** envp) {
     if (child > 0) supervise(child);
     struct ksigaction dfl = {0, 0, 0, 0};
     for (int s = 0; s < 3; s++) sys(NR_rt_sigaction, stop_signals[s], &dfl, 0, 8);
+    /* The app's blocked signals (SIGQUIT, SIGUSR1, SIGPIPE, 32: glibc's SIGCANCEL) are not the guest's. */
+    uint64_t none = 0;
+    sys(NR_rt_sigprocmask, 2 /* SIG_SETMASK */, &none, 0, 8);
 
     install_handler();
     r = install_filter();

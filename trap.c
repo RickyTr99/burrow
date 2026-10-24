@@ -173,13 +173,21 @@ static long do_sigaction(long sig, const struct ksigaction* act, struct ksigacti
     return sys(NR_rt_sigaction, sig, act, old, size);
 }
 
-static long do_sigprocmask(long how, const uint64_t* set, uint64_t* old, long size) {
-    uint64_t mine;
-    if (set != 0 && how != 1 /* SIG_UNBLOCK */) {
-        mine = *set & ~SIGSYS_BIT;
-        set = &mine;
+/* The handler's return restores the mask saved in the signal frame, @mask:
+ * the change goes there (to the thread, it would be undone). */
+static long do_sigprocmask(uint64_t* mask, long how, const uint64_t* set, uint64_t* old, long size) {
+    if (size != 8) return -EINVAL;
+    uint64_t now = *mask;
+    if (set != 0) {
+        if (how == 0 /* SIG_BLOCK */) now |= *set;
+        else if (how == 1 /* SIG_UNBLOCK */) now &= ~*set;
+        else if (how == 2 /* SIG_SETMASK */) now = *set;
+        else return -EINVAL;
+        now &= ~(SIGSYS_BIT | 1ull << (9 - 1) /* SIGKILL */ | 1ull << (19 - 1) /* SIGSTOP */);
     }
-    return sys(NR_rt_sigprocmask, how, set, old, size);
+    if (old != 0) *old = *mask;
+    *mask = now;
+    return 0;
 }
 
 /* A SIGSYS that is not ours: the guest's own filters (Firefox's sandbox),
@@ -939,8 +947,6 @@ static long emulate(long nr, const uint64_t* x) {
 
     case NR_rt_sigaction:
         return do_sigaction((long) x[0], (const struct ksigaction*) x[1], (struct ksigaction*) x[2], (long) x[3]);
-    case NR_rt_sigprocmask:
-        return do_sigprocmask((long) x[0], (const uint64_t*) x[1], (uint64_t*) x[2], (long) x[3]);
     }
     return -ENOSYS;
 }
@@ -951,6 +957,11 @@ static __attribute__((noinline)) void on_sigsys(int sig, struct ksiginfo* info, 
         return;
     }
     uint64_t* x = uc->mcontext.regs;
+    if (info->syscall == NR_rt_sigprocmask) {
+        x[0] = (uint64_t) do_sigprocmask(&uc->sigmask, (long) x[0], (const uint64_t*) x[1], (uint64_t*) x[2],
+                                         (long) x[3]);
+        return;
+    }
     x[0] = (uint64_t) emulate(info->syscall, x);
 }
 
