@@ -46,14 +46,14 @@ enum {
     NR_setxattr = 5, NR_lsetxattr = 6, NR_getxattr = 8, NR_lgetxattr = 9, NR_listxattr = 11, NR_llistxattr = 12,
     NR_removexattr = 14, NR_lremovexattr = 15, NR_getcwd = 17, NR_fcntl = 25, NR_ioctl = 29, NR_inotify_add_watch = 27,
     NR_mknodat = 33, NR_mkdirat = 34, NR_unlinkat = 35, NR_symlinkat = 36, NR_linkat = 37, NR_renameat = 38,
-    NR_statfs = 43, NR_truncate = 45, NR_faccessat = 48, NR_chdir = 49, NR_fchmodat = 53, NR_fchownat = 54,
+    NR_statfs = 43, NR_truncate = 45, NR_faccessat = 48, NR_chdir = 49, NR_chroot = 51, NR_fchmodat = 53, NR_fchownat = 54,
     NR_fchown = 55, NR_openat = 56, NR_close = 57, NR_lseek = 62, NR_read = 63, NR_write = 64, NR_pread64 = 67,
     NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80, NR_utimensat = 88, NR_exit_group = 94,
     NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
     NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159, NR_prctl = 167,
     NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
-    NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
+    NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_getpeername = 205, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
     NR_clone3 = 435, NR_faccessat2 = 439, NR_fchmodat2 = 452, NR_process_vm_readv = 270,
     NR_shmget = 194, NR_shmctl = 195, NR_shmat = 196, NR_shmdt = 197,
@@ -103,6 +103,7 @@ enum {
 #define SA_NODEFER 0x40000000
 #define SIG_BLOCK 0
 #define SIG_SETMASK 2
+#define PR_SET_KEEPCAPS 8
 #define PR_SET_NO_NEW_PRIVS 38
 
 struct open_how {

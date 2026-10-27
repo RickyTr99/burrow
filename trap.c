@@ -24,7 +24,7 @@ static const uint16_t trapped[] = {
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
-    NR_sendto, NR_recvfrom, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt,
+    NR_sendto, NR_recvfrom, NR_getsockname, NR_getpeername, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt, NR_chroot,
     NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
 };
 
@@ -46,7 +46,7 @@ struct sock_filter {
 
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 26];
+    struct sock_filter f[10 + N_TRAPPED + 31];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -86,6 +86,13 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){JEQ, 1, 0, 9 /* NETLINK_AUDIT */};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 93 /* EPROTONOSUPPORT */};
+    /* prctl(PR_SET_KEEPCAPS) succeeds: Android locks the bit (ping keeps
+     * capabilities across setuid()), and the guest's capabilities are fake. */
+    f[i++] = (struct sock_filter){JEQ, 0, 4, NR_prctl};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 16}; /* args[0], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 1, PR_SET_KEEPCAPS};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 0};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     /* ioctl(DRM_IOCTL_VERSION) only: the render node is KGSL, see do_drm_version(). */
     f[i++] = (struct sock_filter){JEQ, 0, 3, NR_ioctl};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
@@ -537,6 +544,27 @@ static long do_recvfrom(const uint64_t* x) {
     return r;
 }
 
+/* getsockname(), getpeername(): a Unix socket's host path becomes the guest's. */
+static long do_sockname(long nr, long fd, char* addr, uint32_t* length) {
+    char a[129];
+    uint32_t n = sizeof(a) - 1;
+    long r = sys(nr, fd, a, &n, 0);
+    if (r < 0) return r;
+    if (n > 2 && n < sizeof(a) && *(const uint16_t*) a == AF_UNIX && a[2] == '/') {
+        char guest[PATH_MAX];
+        a[n] = 0;
+        long g = host_to_guest(a + 2, guest, sizeof(guest));
+        if (g >= 0 && g < 108) {
+            memcpy(a + 2, guest, g + 1);
+            n = (uint32_t) (2 + g + 1);
+        }
+    }
+    if (length == 0) return -EFAULT;
+    memcpy(addr, a, *length < n ? *length : n);
+    *length = n;
+    return 0;
+}
+
 /* The emulated ids of Burrow process @pid, read where Burrow keeps them:
  * its image is at the same address in every process. */
 static int peer_ids(long pid, uint32_t* ids) {
@@ -772,6 +800,46 @@ static long access_host(long nr, const char* host, long mode, long flags) {
     return r;
 }
 
+/* chroot(): the directory becomes the rootfs, the bindings below it stay.
+ * shortcut: SysV shm and link2symlink's links of the old root are not seen
+ * from the new one; keep the first root if a chrooted program needs them. */
+static long do_chroot(const char* path) {
+    char host[PATH_MAX], absolute[PATH_MAX], guest[PATH_MAX], root[sizeof(cfg.root)];
+    if (id(EUID) != 0) return -EPERM;
+    if (path == 0) return -EFAULT;
+    if (path[0] == 0) return -ENOENT;
+    long r = guest_absolute(AT_FDCWD, path, absolute);
+    if (r >= 0) r = to_host(absolute, 1, host, guest);
+    if (r < 0) return r;
+    long fd = sys(NR_openat, AT_FDCWD, host, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+    if (fd < 0) return fd;
+    char link[32] = "/proc/self/fd/";
+    format_unsigned(link + 14, (unsigned long) fd);
+    long n = sys(NR_readlinkat, AT_FDCWD, link, root, sizeof(root) - 1);
+    sys(NR_close, fd, 0, 0, 0);
+    if (n <= 0) return n < 0 ? n : -ENOENT;
+    if (n == (long) sizeof(root) - 1) return -ENAMETOOLONG;
+    root[n] = 0;
+    long g = length_of(guest);
+    if (g == 1) return 0; /* "/" */
+    /* shortcut: other threads may resolve a path meanwhile; chroot() comes before them in practice. */
+    int kept = 0;
+    for (int i = 0; i < cfg.bind_count; i++) {
+        struct bind* b = &cfg.binds[i];
+        if (b->guest_length <= g || memcmp(b->guest, guest, g) != 0 || b->guest[g] != '/') continue;
+        struct bind* k = &cfg.binds[kept++];
+        memmove(k->host, b->host, b->host_length + 1);
+        k->host_length = b->host_length;
+        k->guest_length = b->guest_length - g;
+        memmove(k->guest, b->guest + g, k->guest_length + 1);
+    }
+    cfg.bind_count = kept;
+    memcpy(cfg.root, root, n + 1);
+    cfg.root_length = n;
+    set_root_alias();
+    return 0;
+}
+
 /* -- Dispatch ------------------------------------------------------------------------------- */
 
 static long emulate(long nr, const uint64_t* x) {
@@ -810,6 +878,7 @@ static long emulate(long nr, const uint64_t* x) {
         path = (const char*) x[0];
         ON_HOST(1, sys(NR_chdir, host, 0, 0, 0));
     }
+    case NR_chroot: return do_chroot((const char*) x[0]);
     case NR_mkdirat: ON_HOST(0, sys(NR_mkdirat, AT_FDCWD, host, x[2], 0));
     case NR_mknodat: ON_HOST(0, sys(NR_mknodat, AT_FDCWD, host, x[2], x[3]));
     case NR_unlinkat: {
@@ -909,6 +978,8 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_sendmsg: return do_sendmsg((long) x[0], (const struct kmsghdr*) x[1], (long) x[2]);
     case NR_sendto: return do_sendto(x);
     case NR_recvfrom: return do_recvfrom(x);
+    case NR_getsockname:
+    case NR_getpeername: return do_sockname(nr, (long) x[0], (char*) x[1], (uint32_t*) x[2]);
     case NR_getsockopt: return do_peercred(x);
     case NR_ioctl: return do_drm_version(x);
     case NR_shmget:
