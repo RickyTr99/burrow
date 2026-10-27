@@ -60,7 +60,7 @@ static void uname_line(struct text* t, int field) {
     if (field == 0) {
         put(t, "Linux version ");
         put(t, u.release);
-        put(t, " (droidnux@android) ");
+        put(t, " (burrow@android) ");
         put(t, u.version);
     } else {
         put(t, field == 1 ? u.release : u.nodename);

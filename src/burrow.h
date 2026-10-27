@@ -1,12 +1,11 @@
 /*
- * Burrow: runs the programs of a Linux rootfs on Android, without root and
- * without ptrace.
+ * Burrow: runs the programs of a Linux rootfs on Android (and arm64 Linux),
+ * without root and without ptrace.
  *
- * Burrow is one static binary (libburrow.so, linked at a fixed address) with
- * two roles:
+ * Burrow is one static binary (linked at a fixed address) with two roles:
  *
- * - Launcher: the app starts it with the rootfs, the bindings and a guest
- *   command. It installs a seccomp filter that traps the syscalls Burrow
+ * - Launcher: the app (the user Burrow runs as; on Android, an app's uid)
+ *   starts it with the rootfs, the bindings and a guest command. It installs a seccomp filter that traps the syscalls Burrow
  *   emulates (paths, ids, exec) with SIGSYS, unless they come from Burrow's
  *   own syscall gadget, then executes the command.
  *

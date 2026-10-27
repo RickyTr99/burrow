@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+          make
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build the Go test
+        working-directory: tests/go
+        run: CGO_ENABLED=0 GO111MODULE=off go build -o burrowtest main.go
+
+      - name: Rootfs
+        run: |
+          printf 'FROM debian:trixie\nRUN apt-get update && apt-get install -y --no-install-recommends perl python3 && rm -rf /var/lib/apt/lists/*\n' |
+              docker build -t burrow-rootfs -
+          docker create --name rootfs burrow-rootfs
+          mkdir rootfs
+          docker export rootfs | tar -x -C rootfs --exclude='dev/*'
+
+      - name: Test
+        run: make check ROOTFS=$PWD/rootfs

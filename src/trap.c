@@ -455,8 +455,8 @@ static long socket_address(const char* addr, long length, int follow, void* un, 
     return 1;
 }
 
-/* The guest's nameserver, 127.0.0.53:53, becomes the app's DNS proxy
- * (DnsProxy.kt) in @out: Android's resolver answers. */
+/* The guest's nameserver, 127.0.0.53:53, becomes the DNS proxy given with
+ * -d (on 127.0.0.1) in @out: on Android, the app's, so that Android resolves. */
 static int dns_address(const char* addr, long length, char* out) {
     static const char nameserver[6] = {0, 53, 127, 0, 0, 53}; /* port and address, big-endian */
     if (cfg.dns_port == 0 || addr == 0 || length < 8 || *(const uint16_t*) addr != AF_INET ||
@@ -644,7 +644,7 @@ static long do_drm_version(const uint64_t* x) {
         char* desc;
     }* v = (struct drm_version*) x[2];
     if (v == 0) return -EFAULT;
-    static const char* const strings[] = {"kgsl", "20260101", "Qualcomm KGSL (DroidNux)"};
+    static const char* const strings[] = {"kgsl", "20260101", "Qualcomm KGSL (Burrow)"};
     size_t* lengths[] = {&v->name_length, &v->date_length, &v->desc_length};
     char* buffers[] = {v->name, v->date, v->desc};
     v->major = 1, v->minor = 0, v->patchlevel = 0;

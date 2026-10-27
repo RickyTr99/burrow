@@ -2,7 +2,7 @@
  * Entry point: the loader of an emulated execve() when BURROW is in the
  * environment, the launcher otherwise:
  *
- *   libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [--] PROGRAM [ARG]...
+ *   burrow -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [-s STATS_FILE] [--] PROGRAM [ARG]...
  *
  * The launcher stays as the parent of the guest's process tree, like proot
  * with --kill-on-exit: when the program exits, or the launcher gets SIGTERM
@@ -196,7 +196,7 @@ static void launch(long argc, char** argv, char** envp) {
         }
         else die("unknown option ", a);
     }
-    if (root == 0 || i >= argc) die("usage: libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] [-d DNS_PORT] [-s STATS_FILE] PROGRAM [ARG]...", 0);
+    if (root == 0 || i >= argc) die("usage: burrow -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] [-d DNS_PORT] [-s STATS_FILE] PROGRAM [ARG]...", 0);
 
     long fd = sys(NR_openat, AT_FDCWD, root, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
     if (fd < 0 || (cfg.root_length = fd_path(fd, cfg.root, sizeof(cfg.root))) <= 1) die("cannot open the rootfs ", root);
