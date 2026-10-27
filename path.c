@@ -97,9 +97,38 @@ static long unhost(char* t, long n) {
     return n;
 }
 
+/* Drops the empty and "." components of the absolute path @p, in place:
+ * they mean the same whatever the symlinks. A "." at the end leaves a slash,
+ * which keeps its meaning (a directory). */
+static int only_slashes(const char* s) {
+    while (*s == '/') s++;
+    return *s == 0;
+}
+
+static void tidy(char* p) {
+    long to = 1;
+    for (long at = 1; p[at];) {
+        if (p[at] == '/') {
+            at++;
+            continue;
+        }
+        int dot = p[at] == '.' && (p[at + 1] == '/' || p[at + 1] == 0);
+        if (!dot) {
+            if (to > 1) p[to++] = '/';
+            while (p[at] && p[at] != '/') p[to++] = p[at++];
+        } else {
+            at++;
+        }
+        if (only_slashes(p + at) && (p[at] == '/' || dot) && to > 1) p[to++] = '/';
+        if (only_slashes(p + at)) break;
+    }
+    p[to] = 0;
+}
+
 long guest_absolute(long dirfd, const char* path, char* out) {
     if (path[0] == '/') {
         long r = copy(out, PATH_MAX, path);
+        if (r >= 0) tidy(out);
         return r < 0 ? r : 0;
     }
     char host[PATH_MAX];
@@ -120,21 +149,22 @@ long guest_absolute(long dirfd, const char* path, char* out) {
     if (n < 0) return n;
     if (n > 1) out[n++] = '/';
     r = join(out, out, n, path);
+    if (r >= 0) tidy(out);
     return r < 0 ? r : 0;
 }
 
-/* Whether the absolute guest path @p has no empty, "." or ".." component and
- * no trailing slash: the kernel resolves it as we would, symlinks apart. */
+/* Whether the absolute guest path @p has no empty, "." or ".." component (a
+ * trailing slash apart): the kernel resolves it as we would, symlinks apart. */
 static int plain(const char* p) {
     if (p[0] != '/') return 0;
-    if (p[1] == 0) return 1;
-    for (long i = 1;; i++) {
+    for (long i = 1; p[i];) {
         long start = i;
         while (p[i] != 0 && p[i] != '/') i++;
         long n = i - start;
         if (n == 0 || (n == 1 && p[start] == '.') || (n == 2 && p[start] == '.' && p[start + 1] == '.')) return 0;
-        if (p[i] == 0) return 1;
+        if (p[i] == '/') i++;
     }
+    return 1;
 }
 
 /* Whether the host path @host exists without any symlink (the last component
@@ -144,6 +174,32 @@ static long no_symlinks(const char* host, int follow, long extra) {
     long fd = sys(NR_openat2, AT_FDCWD, host, &how, sizeof(how));
     if (fd >= 0) sys(NR_close, fd, 0, 0, 0);
     return fd < 0 ? fd : 0;
+}
+
+/* to_host() of the absolute guest path @guest when the kernel resolves it
+ * as we would: a plain path, no binding, no symlink. -ELOOP if not. */
+static long probe(const char* guest, int follow, char* host, char* resolved) {
+    long n = length_of(guest);
+    if (!plain(guest) || binding_of(guest, n) != 0) return -ELOOP;
+    long h = host_of(guest, n, host);
+    if (h < 0) return h;
+    long r = no_symlinks(host, follow, 0);
+    if (r == -ENOENT) {
+        /* Missing: fine if its directory has no symlink (a file to create). */
+        long slash = h - 1; /* past a trailing slash */
+        while (host[slash] != '/' || slash == h - 1) slash--;
+        if (slash <= cfg.root_length) {
+            r = 0;
+        } else {
+            char kept = host[slash];
+            host[slash] = 0;
+            r = no_symlinks(host, 1, O_DIRECTORY);
+            host[slash] = kept;
+        }
+    }
+    /* ENOENT, ENOTDIR: met before any symlink, so the walk would too. */
+    if (r == 0) memcpy(resolved, guest, n + 1);
+    return r == 0 || r == -ENOENT || r == -ENOTDIR || r == -EACCES ? r : -ELOOP;
 }
 
 /* The slow path: resolves @path one component at a time. */
@@ -211,6 +267,16 @@ static long walk(const char* path, int follow, char* host, char* out) {
             at = 0;
             n = target[0] == '/' ? 1 : previous;
             out[n] = 0;
+            /* What is left most often has no symlink (/lib -> usr/lib): try it whole. */
+            long w = rest[0] == '/' ? 0 : n;
+            memcpy(target, out, w);
+            if (w > 1) target[w++] = '/';
+            if (w + rest_length < PATH_MAX) {
+                memcpy(target + w, rest, rest_length + 1);
+                tidy(target);
+                long whole = probe(target, follow, host, out);
+                if (whole != -ELOOP) return whole;
+            }
             continue;
         }
         if (!last && (st.mode & S_IFMT) != S_IFDIR) return -ENOTDIR;
@@ -265,31 +331,61 @@ long to_host(const char* guest, int follow, char* host, char* resolved) {
         if (r >= 0) r = copy(resolved, PATH_MAX, cfg.exe);
         return r < 0 ? r : 0;
     }
-    long n = length_of(guest);
-    if (plain(guest) && binding_of(guest, n) == 0) {
-        long h = host_of(guest, n, host);
-        if (h < 0) return h;
-        long r = no_symlinks(host, follow, 0);
-        if (r == -ENOENT) {
-            /* Missing: fine if its directory has no symlink (a file to create). */
-            long slash = h;
-            while (host[slash] != '/') slash--;
-            if (slash <= cfg.root_length) {
-                r = 0;
-            } else {
-                host[slash] = 0;
-                r = no_symlinks(host, 1, O_DIRECTORY);
-                host[slash] = '/';
-            }
-        }
-        /* ENOENT, ENOTDIR: met before any symlink, so the walk would too. */
-        if (r == 0 || r == -ENOENT || r == -ENOTDIR || r == -EACCES) {
-            if (r == 0) memcpy(resolved, guest, n + 1);
-            return r;
-        }
-        /* ELOOP: a symlink on the way. */
+    uint64_t start = stats_start();
+    long r = probe(guest, follow, host, resolved);
+    if (r != -ELOOP) {
+        stats_step(STATS_PROBE, start);
+        return r;
     }
-    return walk(guest, follow, host, resolved);
+    r = walk(guest, follow, host, resolved);
+    stats_step(STATS_WALK, start);
+    return r;
+}
+
+/* Whether the kernel resolves the absolute guest path @guest as we would:
+ * no binding, no "." or "..", and symlinks refused (RESOLVE_NO_SYMLINKS). */
+static int direct(const char* guest) {
+    return plain(guest) && !starts_with(guest, "/proc/") && binding_of(guest, length_of(guest)) == 0;
+}
+
+long host_fd(long dirfd, const char* path, int follow, char* host, long* fd) {
+    char guest[PATH_MAX], resolved[PATH_MAX];
+    *fd = -1;
+    if (path == 0) return -EFAULT;
+    if (path[0] == 0) return -ENOENT;
+    long r = guest_absolute(dirfd, path, guest);
+    if (r < 0) return r;
+    if (!direct(guest)) return to_host(guest, follow, host, 0);
+    uint64_t start = stats_start();
+    r = host_of(guest, length_of(guest), host);
+    if (r < 0) return r;
+    struct open_how how = {O_PATH | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW), 0, RESOLVE_NO_SYMLINKS};
+    r = sys(NR_openat2, AT_FDCWD, host, &how, sizeof(how));
+    if (r != -ELOOP) {
+        /* ENOENT, ENOTDIR, EACCES: met before any symlink, so the walk would too. */
+        if (r >= 0) *fd = r;
+        stats_step(STATS_PROBE, start);
+        return r < 0 ? r : 0;
+    }
+    r = walk(guest, follow, host, resolved);
+    stats_step(STATS_WALK, start);
+    return r;
+}
+
+long open_direct(long dirfd, const char* path, long flags, long mode) {
+    char guest[PATH_MAX], host[PATH_MAX];
+    if (path == 0) return -EFAULT;
+    if (path[0] == 0) return -ENOENT;
+    long r = guest_absolute(dirfd, path, guest);
+    if (r < 0) return r;
+    if (!direct(guest)) return -ELOOP;
+    uint64_t start = stats_start();
+    r = host_of(guest, length_of(guest), host);
+    if (r < 0) return r;
+    struct open_how how = {(uint64_t) flags, flags & O_CREAT ? (uint64_t) mode & 07777 : 0, RESOLVE_NO_SYMLINKS};
+    r = sys(NR_openat2, AT_FDCWD, host, &how, sizeof(how));
+    stats_step(STATS_OPEN, start);
+    return r;
 }
 
 long host_path(long dirfd, const char* path, int follow, char* host) {

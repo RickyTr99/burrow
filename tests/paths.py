@@ -2,6 +2,7 @@
 import errno
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -45,6 +46,19 @@ ok(error_of(lambda: os.stat(d + "/loop1")) == errno.ELOOP, "symlink loop: ELOOP"
 ok(error_of(lambda: os.stat(d + "/missing")) == errno.ENOENT, "missing: ENOENT")
 ok(error_of(lambda: os.stat(f + "/x")) == errno.ENOTDIR, "file as a directory: ENOTDIR")
 
+# Empty and "." components, trailing slashes
+ok(open(d + "//./f").read() == "data" and open("//" + d[1:] + "/./abs").read() == "data", "// and /./")
+ok(os.path.isdir(d + "/") and os.path.isdir(d + "/.") and os.path.isdir(d + "//"), "a directory with a trailing slash")
+ok(error_of(lambda: os.stat(f + "/")) == errno.ENOTDIR, "a file with a trailing slash: ENOTDIR")
+ok(error_of(lambda: os.stat(d + "/abs/")) == errno.ENOTDIR, "a symlink to a file with a trailing slash: ENOTDIR")
+os.mkdir(d + "/made/")
+ok(os.path.isdir(d + "/made"), "mkdir with a trailing slash")
+os.rmdir(d + "/made//")
+ok(stat.S_ISCHR(os.stat("//dev//null").st_mode) and stat.S_ISCHR(os.stat("/dev/./null").st_mode), "// before a binding")
+ok(os.readlink("/proc//self/./exe") == os.path.realpath(sys.executable), "// in /proc")
+ok(os.stat("/lib/").st_ino == os.stat("/usr/lib").st_ino, "/lib/ (a symlink with a slash)")
+ok(error_of(lambda: open(d + "/etc/")) == errno.ENOTDIR, "open of a symlink to a file, slash: ENOTDIR")
+
 # The root stays the root
 ok(os.stat("/..").st_ino == os.stat("/").st_ino, "/.. is /")
 ok("etc" in os.listdir("/../../.."), "/../../.. lists the rootfs")
@@ -56,6 +70,12 @@ ok(os.read(os.open("f", os.O_RDONLY, dir_fd=fd), 4) == b"data", "openat on a dir
 ok(os.readlink("abs", dir_fd=fd) == f, "readlinkat on a dirfd")
 os.mkdir(d + "/sub")
 os.symlink(d + "/sub", d + "/sublink")
+os.symlink("../f", d + "/sub/up")
+os.symlink(d + "/sub/up", d + "/chain")
+ok(open(d + "/sub/up").read() == "data" and open(d + "/chain").read() == "data", "a relative symlink with .., a chain")
+ok(open(d + "/sublink/../f").read() == "data", ".. after a symlink to a directory")
+libc = "/lib/aarch64-linux-gnu/libc.so.6"
+ok(os.path.realpath(libc) == "/usr" + libc and os.stat(libc).st_ino == os.stat("/usr" + libc).st_ino, "/lib -> usr/lib")
 os.chdir(d + "/sublink")
 ok(os.getcwd() == d + "/sub", "getcwd after chdir through a symlink")
 ok(os.readlink("/proc/self/cwd") == d + "/sub", "/proc/self/cwd")
@@ -86,7 +106,7 @@ ok(os.statvfs(d).f_bsize > 0, "statfs")
 os.link(d + "/g", d + "/h")
 ok(os.stat(d + "/h").st_nlink == 2 and os.stat(d + "/g").st_nlink == 2, "link: two links")
 ok(open(d + "/h").read() == "n", "link: same content")
-ok(sorted(n for n in os.listdir(d) if not n.startswith(".l2s.")) == sorted(["abs", "etc", "g", "h", "loop1", "loop2", "rel", "sub", "sublink"]), "listing")
+ok(sorted(n for n in os.listdir(d) if not n.startswith(".l2s.")) == sorted(["abs", "chain", "etc", "g", "h", "loop1", "loop2", "rel", "sub", "sublink"]), "listing")
 os.unlink(d + "/g")
 ok(open(d + "/h").read() == "n" and os.stat(d + "/h").st_nlink == 1, "unlink one link: the other stays")
 

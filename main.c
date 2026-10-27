@@ -190,9 +190,13 @@ static void launch(long argc, char** argv, char** envp) {
             if (*p || port == 0 || port > 65535) die("bad DNS port ", argv[i]);
             cfg.dns_port = (uint16_t) port;
         }
+        else if (same(a, "-s")) {
+            const char* p = argv[++i];
+            if (p[0] != '/' || copy(cfg.stats, sizeof(cfg.stats), p) < 0) die("bad statistics file ", p);
+        }
         else die("unknown option ", a);
     }
-    if (root == 0 || i >= argc) die("usage: libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] [-d DNS_PORT] PROGRAM [ARG]...", 0);
+    if (root == 0 || i >= argc) die("usage: libburrow.so -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] [-d DNS_PORT] [-s STATS_FILE] PROGRAM [ARG]...", 0);
 
     long fd = sys(NR_openat, AT_FDCWD, root, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
     if (fd < 0 || (cfg.root_length = fd_path(fd, cfg.root, sizeof(cfg.root))) <= 1) die("cannot open the rootfs ", root);

@@ -192,6 +192,7 @@ struct config {
     char host_exe[PATH_MAX]; /* and as a host path */
     char name[16];           /* its process name: the file execve() was given */
     uint16_t dns_port;       /* the app's DNS proxy on 127.0.0.1, 0 if none */
+    char stats[512];         /* the statistics file (-s), a host path; empty if none */
 };
 
 extern struct config cfg;
@@ -240,11 +241,24 @@ long guest_absolute(long dirfd, const char* path, char* out);
 long to_host(const char* guest, int follow, char* host, char* resolved);
 long host_path(long dirfd, const char* path, int follow, char* host);
 long host_to_guest(const char* host, char* out, long size);
+/* host_path() for a call that creates nothing, in one walk when it can: *@fd
+ * is then the file, opened O_PATH (to be closed), else -1 and @host is to be
+ * used. ENOENT is final: no directory is checked for a file to create. */
+long host_fd(long dirfd, const char* path, int follow, char* host, long* fd);
+/* openat() in one walk, when the kernel resolves the path as we would: a
+ * plain path and no symlink. -ELOOP, -EINVAL (openat2() is stricter) and
+ * -EACCES (the fake root's permissions) mean taking to_host()'s way. */
+long open_direct(long dirfd, const char* path, long flags, long mode);
 
 /* trap.c */
 void install_handler(void);
 long install_filter(void);
 long emulate_execve(long dirfd, const char* path, char* const* argv, char* const* envp, long flags);
+
+/* Statistics (-s): Burrow's own steps, counted past the syscalls. */
+enum { STATS_PROBE = 500, STATS_WALK = 501, STATS_OPEN = 502 };
+uint64_t stats_start(void);
+void stats_step(int step, uint64_t start);
 
 /* sysv.c */
 long emulate_sysv(long nr, const uint64_t* x);

@@ -313,9 +313,16 @@ static long do_readlink(long dirfd, const char* path, char* buf, long size) {
     if (same(guest, "/proc/self/exe") || same(guest, "/proc/thread-self/exe")) {
         r = copy(target, PATH_MAX, cfg.exe);
     } else {
-        r = to_host(guest, 0, host, 0);
+        long fd;
+        r = host_fd(AT_FDCWD, guest, 0, host, &fd);
         if (r < 0) return r;
-        r = sys(NR_readlinkat, AT_FDCWD, host, target, PATH_MAX - 1);
+        if (fd >= 0) {
+            r = sys(NR_readlinkat, fd, "", target, PATH_MAX - 1);
+            sys(NR_close, fd, 0, 0, 0);
+            if (r == -ENOENT) r = -EINVAL; /* older kernels, on no symlink */
+        } else {
+            r = sys(NR_readlinkat, AT_FDCWD, host, target, PATH_MAX - 1);
+        }
         if (r < 0) return r;
         target[r] = 0;
         /* Another process's exe is Burrow: KWin finds its clients' desktop files by it. */
@@ -347,6 +354,17 @@ static long do_chown(long dirfd, const char* path, long flags) {
     ON_HOST(!(flags & AT_SYMLINK_NOFOLLOW), sys(NR_newfstatat, AT_FDCWD, host, &st, AT_SYMLINK_NOFOLLOW));
 }
 
+/* newfstatat() of @path into @st, the last component followed if @follow;
+ * @host is the host path. */
+static long stat_host(long dirfd, const char* path, int follow, char* host, struct kstat* st) {
+    long fd, r = host_fd(dirfd, path, follow, host, &fd);
+    if (r < 0) return r;
+    if (fd < 0) return sys(NR_newfstatat, AT_FDCWD, host, st, follow ? 0 : AT_SYMLINK_NOFOLLOW);
+    r = sys(NR_newfstatat, fd, "", st, AT_EMPTY_PATH);
+    sys(NR_close, fd, 0, 0, 0);
+    return r;
+}
+
 /* stat() and lstat(): a faked hard link shows as its file. The last
  * component is looked at unfollowed first: most are no symlink, and that one
  * call answers both. */
@@ -356,15 +374,25 @@ static long do_stat(long dirfd, const char* path, struct kstat* st, long flags) 
         r = sys(NR_newfstatat, dirfd, path, st, flags);
     } else {
         char host[PATH_MAX];
-        r = host_path(dirfd, path, 0, host);
-        if (r == 0) r = sys(NR_newfstatat, AT_FDCWD, host, st, AT_SYMLINK_NOFOLLOW);
+        r = stat_host(dirfd, path, 0, host, st);
         if (r == -EACCES && proc_file(host) >= 0) r = proc_stat(st);
-        if (r == 0 && (st->mode & S_IFMT) == S_IFLNK && !l2s_stat(host, st) && !(flags & AT_SYMLINK_NOFOLLOW)) {
-            r = host_path(dirfd, path, 1, host);
-            if (r == 0) r = sys(NR_newfstatat, AT_FDCWD, host, st, 0);
-        }
+        if (r == 0 && (st->mode & S_IFMT) == S_IFLNK && !l2s_stat(host, st) && !(flags & AT_SYMLINK_NOFOLLOW))
+            r = stat_host(dirfd, path, 1, host, st);
     }
     fake_stat(r, st);
+    return r;
+}
+
+/* statx() of @path into @stx, with @flags but for following, the last
+ * component followed if @follow; @host is the host path. */
+static long statx_host(long dirfd, const char* path, int follow, long flags, long mask, char* host,
+                       struct kstatx* stx) {
+    long fd, r = host_fd(dirfd, path, follow, host, &fd);
+    if (r < 0) return r;
+    flags &= ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
+    if (fd < 0) return sys6(NR_statx, AT_FDCWD, (long) host, flags | (follow ? 0 : AT_SYMLINK_NOFOLLOW), mask, (long) stx, 0);
+    r = sys6(NR_statx, fd, (long) "", flags | AT_EMPTY_PATH, mask, (long) stx, 0);
+    sys(NR_close, fd, 0, 0, 0);
     return r;
 }
 
@@ -375,14 +403,11 @@ static long do_statx(long dirfd, const char* path, long flags, long mask, struct
     } else {
         char host[PATH_MAX];
         long nofollow = (flags & ~AT_EMPTY_PATH) | AT_SYMLINK_NOFOLLOW;
-        r = host_path(dirfd, path, 0, host);
-        if (r == 0) r = sys6(NR_statx, AT_FDCWD, (long) host, nofollow, mask | 1 /* STATX_TYPE */, (long) stx, 0);
+        r = statx_host(dirfd, path, 0, flags, mask | 1 /* STATX_TYPE */, host, stx);
         if (r == -EACCES && proc_file(host) >= 0) r = proc_statx(stx);
         if (r == 0 && (stx->mode & S_IFMT) == S_IFLNK && !l2s_statx(host, nofollow, mask, stx) &&
-            !(flags & AT_SYMLINK_NOFOLLOW)) {
-            r = host_path(dirfd, path, 1, host);
-            if (r == 0) r = sys6(NR_statx, AT_FDCWD, (long) host, nofollow & ~AT_SYMLINK_NOFOLLOW, mask, (long) stx, 0);
-        }
+            !(flags & AT_SYMLINK_NOFOLLOW))
+            r = statx_host(dirfd, path, 1, flags, mask, host, stx);
     }
     fake_statx(r, stx);
     return r;
@@ -794,9 +819,17 @@ static long open_as_root(long nr, const char* host, long flags, long a, long b) 
     return r;
 }
 
-/* faccessat() of @host: the made-up files of /proc are readable. */
-static long access_host(long nr, const char* host, long mode, long flags) {
-    long r = sys(nr, AT_FDCWD, host, mode, flags);
+/* faccessat() and faccessat2(): the made-up files of /proc are readable. */
+static long do_access(long dirfd, const char* path, long mode, long flags) {
+    char host[PATH_MAX];
+    long fd, r = host_fd(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW), host, &fd);
+    if (r < 0) return r;
+    if (fd >= 0) {
+        r = sys(NR_faccessat2, fd, "", mode, (flags & ~AT_SYMLINK_NOFOLLOW) | AT_EMPTY_PATH);
+        sys(NR_close, fd, 0, 0, 0);
+        return r;
+    }
+    r = flags ? sys(NR_faccessat2, AT_FDCWD, host, mode, flags) : sys(NR_faccessat, AT_FDCWD, host, mode, 0);
     if (r == -EACCES && !(mode & 3 /* W_OK | X_OK */) && proc_file(host) >= 0) return 0;
     return r;
 }
@@ -853,6 +886,8 @@ static long emulate(long nr, const uint64_t* x) {
          * refuses: say it is unsupported, so programs (Qt's QTemporaryFile,
          * glibc's tmpfile()) fall back to a named file. */
         if (flags & 020000000 /* __O_TMPFILE */) return -95 /* EOPNOTSUPP */;
+        long r = open_direct(dirfd, path, flags, (long) x[3]);
+        if (r != -ELOOP && r != -EINVAL && r != -EACCES) return r;
         int follow = !(flags & O_NOFOLLOW) && (flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
         ON_HOST(follow, open_as_root(NR_openat, host, flags, flags, (long) x[3]));
     }
@@ -868,10 +903,10 @@ static long emulate(long nr, const uint64_t* x) {
         return r;
     }
     case NR_statx: return do_statx(dirfd, path, (long) x[2], (long) x[3], (struct kstatx*) x[4]);
-    case NR_faccessat: ON_HOST(1, access_host(NR_faccessat, host, (long) x[2], 0));
+    case NR_faccessat: return do_access(dirfd, path, (long) x[2], 0);
     case NR_faccessat2:
         if (empty(path) && (x[3] & AT_EMPTY_PATH)) return sys(NR_faccessat2, x[0], path, x[2], x[3]);
-        ON_HOST(!(x[3] & AT_SYMLINK_NOFOLLOW), access_host(NR_faccessat2, host, (long) x[2], (long) x[3]));
+        return do_access(dirfd, path, (long) x[2], (long) x[3]);
     case NR_readlinkat: return do_readlink(dirfd, path, (char*) x[2], (long) x[3]);
     case NR_getcwd: return do_getcwd((char*) x[0], (long) x[1]);
     case NR_chdir: {
@@ -1043,11 +1078,62 @@ static long emulate(long nr, const uint64_t* x) {
     return -ENOSYS;
 }
 
-static __attribute__((noinline)) void on_sigsys(int sig, struct ksiginfo* info, struct kucontext* uc) {
-    if (info->code != SYS_SECCOMP || info->errno_ != TRAP_DATA) {
-        foreign(sig, info, uc);
-        return;
+/* -- Statistics (-s) -------------------------------------------------------------------------- */
+
+/* Per syscall, shared by all the guest's processes through a MAP_SHARED file:
+ * traps, and ticks of the virtual counter in the whole handler (stack
+ * switching included) and in the emulation alone. */
+#define STATS_MAGIC 0x31737473776f7262ull /* "burwsts1" */
+#define STATS_SYSCALLS 512
+struct stats {
+    uint64_t magic, frequency;
+    uint64_t count[STATS_SYSCALLS], total[STATS_SYSCALLS], emulated[STATS_SYSCALLS];
+};
+static struct stats* stats;
+
+static inline uint64_t ticks(void) {
+    uint64_t t;
+    __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(t));
+    return t;
+}
+
+static void open_stats(void) {
+    long fd = sys(NR_openat, AT_FDCWD, cfg.stats, 2 /* O_RDWR */ | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    struct kstat st;
+    if (sys(NR_fstat, fd, &st, 0, 0) == 0 && st.size < (int64_t) sizeof(struct stats))
+        sys(46 /* NR_ftruncate */, fd, sizeof(struct stats), 0, 0);
+    long p = sys6(NR_mmap, 0, sizeof(struct stats), PROT_READ | PROT_WRITE, 1 /* MAP_SHARED */, fd, 0);
+    sys(NR_close, fd, 0, 0, 0);
+    if (p < 0 && p > -4096) return;
+    stats = (struct stats*) p;
+    if (stats->magic != STATS_MAGIC) {
+        uint64_t frequency;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+        stats->frequency = frequency;
+        stats->magic = STATS_MAGIC;
     }
+}
+
+uint64_t stats_start(void) {
+    return stats ? ticks() : 0;
+}
+
+void stats_step(int step, uint64_t start) {
+    if (stats == 0) return;
+    __atomic_fetch_add(&stats->count[step], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&stats->total[step], ticks() - start, __ATOMIC_RELAXED);
+}
+
+static void count(const struct ksiginfo* info, uint64_t* sums, uint64_t start) {
+    if (info->code != SYS_SECCOMP || info->errno_ != TRAP_DATA || (unsigned) info->syscall >= STATS_SYSCALLS) return;
+    if (sums == stats->total) __atomic_fetch_add(&stats->count[info->syscall], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sums[info->syscall], ticks() - start, __ATOMIC_RELAXED);
+}
+
+/* -- Handler ------------------------------------------------------------------------------- */
+
+static void on_trap(struct ksiginfo* info, struct kucontext* uc) {
     uint64_t* x = uc->mcontext.regs;
     if (info->syscall == NR_rt_sigprocmask) {
         x[0] = (uint64_t) do_sigprocmask(&uc->sigmask, (long) x[0], (const uint64_t*) x[1], (uint64_t*) x[2],
@@ -1055,6 +1141,16 @@ static __attribute__((noinline)) void on_sigsys(int sig, struct ksiginfo* info, 
         return;
     }
     x[0] = (uint64_t) emulate(info->syscall, x);
+}
+
+static __attribute__((noinline)) void on_sigsys(int sig, struct ksiginfo* info, struct kucontext* uc) {
+    if (info->code != SYS_SECCOMP || info->errno_ != TRAP_DATA) {
+        foreign(sig, info, uc);
+        return;
+    }
+    uint64_t start = stats ? ticks() : 0;
+    on_trap(info, uc);
+    if (stats) count(info, stats->emulated, start);
 }
 
 /* The handler needs tens of KB, more than the signal stacks guests set up
@@ -1096,6 +1192,7 @@ static void on_sigsys_entry(int sig, struct ksiginfo* info, struct kucontext* uc
         int flags;
         size_t size;
     } ours, old;
+    uint64_t start = stats ? ticks() : 0;
     int slot = claim_stack();
     if (slot >= 0) {
         ours.sp = stacks + (long) slot * STACK_SIZE;
@@ -1109,18 +1206,20 @@ static void on_sigsys_entry(int sig, struct ksiginfo* info, struct kucontext* uc
     }
     if (slot < 0) {
         on_sigsys(sig, info, uc);
-        return;
+    } else {
+        burrow_call_on_stack(sig, info, uc, (void*) on_sigsys, (char*) ours.sp + STACK_SIZE);
+        old.flags &= ~1; /* SS_ONSTACK, reported only */
+        sys(NR_sigaltstack, &old, 0, 0, 0);
+        __atomic_store_n(&stack_owner[slot], 0, __ATOMIC_RELEASE);
     }
-    burrow_call_on_stack(sig, info, uc, (void*) on_sigsys, (char*) ours.sp + STACK_SIZE);
-    old.flags &= ~1; /* SS_ONSTACK, reported only */
-    sys(NR_sigaltstack, &old, 0, 0, 0);
-    __atomic_store_n(&stack_owner[slot], 0, __ATOMIC_RELEASE);
+    if (stats) count(info, stats->total, start);
 }
 
 void install_handler(void) {
     long p = sys6(NR_mmap, 0, (long) STACKS * STACK_SIZE, PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     stacks = p < 0 && p > -4096 ? 0 : (char*) p;
+    if (cfg.stats[0]) open_stats();
     /* Not SA_ONSTACK: the kernel's frame goes on the thread's stack, as the
      * guest's sigaltstack may be too small for it and the handler both.
      * shortcut: goroutine stacks are small too; Go programs would need
