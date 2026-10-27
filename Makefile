@@ -5,7 +5,10 @@
 #   make CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
 #   make check ROOTFS=/path/to/rootfs     # the tests (perl and python3 in it)
 
-CC ?= clang
+# make's own default is cc, which may be gcc: --target and lld are clang's.
+ifeq ($(origin CC),default)
+CC := clang
+endif
 TARGET ?= aarch64-linux-gnu
 OUT ?= burrow
 
