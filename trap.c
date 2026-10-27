@@ -1154,14 +1154,22 @@ static __attribute__((noinline)) void on_sigsys(int sig, struct ksiginfo* info, 
 }
 
 /* The handler needs tens of KB, more than the signal stacks guests set up
- * (Firefox's threads: 20 KB), so it runs on one of these, owned by a thread id.
- * The stack is also the thread's sigaltstack meanwhile: a nested signal (a
- * trapped syscall in a guest SIGSYS handler) must go below it, not at the top
- * of the guest's sigaltstack, where the outer frame lives. */
+ * (Firefox's threads: 20 KB, Go's: 32 KB), so it runs on one of these, owned
+ * by a thread id. The stack is also the thread's sigaltstack meanwhile: a
+ * nested signal (a trapped syscall in a guest SIGSYS handler) must go below
+ * it, not at the top of the guest's sigaltstack, where the outer frame lives. */
 #define STACKS 32
 #define STACK_SIZE (128 * 1024)
 static char* stacks;
 static int stack_owner[STACKS];
+
+struct kstack {
+    void* sp;
+    int flags;
+    size_t size;
+};
+static struct kstack saved_stack[STACKS]; /* the guest's sigaltstack, per stack of ours in use */
+static char stack_switched[STACKS];
 
 extern void burrow_call_on_stack(long a, void* b, void* c, void* fn, char* top);
 
@@ -1186,30 +1194,32 @@ static int claim_stack(void) {
     return -1;
 }
 
+/* On a stack of ours, which becomes the sigaltstack. Changed from here: the
+ * kernel refuses to change it from the sigaltstack in use, where SA_ONSTACK
+ * may have put the handler. Signals are blocked until then (sa_mask): one
+ * would go at the top of the guest's sigaltstack, over our frame. Then the
+ * guest's mask is back, so that they interrupt a blocking emulated call. */
+static void on_our_stack(int sig, struct ksiginfo* info, struct kucontext* uc) {
+    int slot = (int) (((char*) __builtin_frame_address(0) - stacks) / STACK_SIZE);
+    struct kstack ours = {stacks + (long) slot * STACK_SIZE, 0, STACK_SIZE};
+    stack_switched[slot] = sys(NR_sigaltstack, &ours, &saved_stack[slot], 0, 0) == 0;
+    sys(NR_rt_sigprocmask, SIG_SETMASK, &uc->sigmask, 0, 8);
+    on_sigsys(sig, info, uc);
+}
+
 static void on_sigsys_entry(int sig, struct ksiginfo* info, struct kucontext* uc) {
-    struct {
-        void* sp;
-        int flags;
-        size_t size;
-    } ours, old;
     uint64_t start = stats ? ticks() : 0;
     int slot = claim_stack();
-    if (slot >= 0) {
-        ours.sp = stacks + (long) slot * STACK_SIZE;
-        ours.flags = 0;
-        ours.size = STACK_SIZE;
-        /* EPERM when already on the guest's sigaltstack: stay there. */
-        if (sys(NR_sigaltstack, &ours, &old, 0, 0) < 0) {
-            __atomic_store_n(&stack_owner[slot], 0, __ATOMIC_RELEASE);
-            slot = -1;
-        }
-    }
     if (slot < 0) {
+        sys(NR_rt_sigprocmask, SIG_SETMASK, &uc->sigmask, 0, 8);
         on_sigsys(sig, info, uc);
     } else {
-        burrow_call_on_stack(sig, info, uc, (void*) on_sigsys, (char*) ours.sp + STACK_SIZE);
-        old.flags &= ~1; /* SS_ONSTACK, reported only */
-        sys(NR_sigaltstack, &old, 0, 0, 0);
+        burrow_call_on_stack(sig, info, uc, (void*) on_our_stack, stacks + (long) (slot + 1) * STACK_SIZE);
+        /* Back off our stack, where the kernel lets the guest's come back. */
+        if (stack_switched[slot]) {
+            saved_stack[slot].flags &= ~1; /* SS_ONSTACK, reported only */
+            sys(NR_sigaltstack, &saved_stack[slot], 0, 0, 0);
+        }
         __atomic_store_n(&stack_owner[slot], 0, __ATOMIC_RELEASE);
     }
     if (stats) count(info, stats->total, start);
@@ -1220,10 +1230,11 @@ void install_handler(void) {
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     stacks = p < 0 && p > -4096 ? 0 : (char*) p;
     if (cfg.stats[0]) open_stats();
-    /* Not SA_ONSTACK: the kernel's frame goes on the thread's stack, as the
-     * guest's sigaltstack may be too small for it and the handler both.
-     * shortcut: goroutine stacks are small too; Go programs would need
-     * SA_ONSTACK with a sigaltstack of ours. */
-    struct ksigaction act = {(uintptr_t) on_sigsys_entry, SA_SIGINFO | SA_NODEFER, 0, 0};
+    /* SA_ONSTACK: the kernel's frame goes on the guest's sigaltstack if it has
+     * one, not on the thread's stack, which may be a goroutine's few KB. The
+     * handler itself moves to a stack of ours, all signals blocked meanwhile
+     * but SIGSYS (a blocked trap would kill). */
+    struct ksigaction act = {(uintptr_t) on_sigsys_entry, SA_SIGINFO | SA_NODEFER | SA_ONSTACK, 0,
+                             ~(1ull << (SIGSYS - 1))};
     if (sys(NR_rt_sigaction, SIGSYS, &act, 0, 8) < 0) die("cannot install the SIGSYS handler", 0);
 }

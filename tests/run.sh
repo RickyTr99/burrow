@@ -15,6 +15,12 @@ for t in "$@"; do
     echo "== $t"
     timeout 120 $run "$t" || failed="$failed $t"
 done
+# Built by tools/burrow-test.sh when it finds Go.
+if [ -f go/burrowtest ] && [ "$*" = "$(echo *.py *.pl)" ]; then
+    echo "== go"
+    chmod 755 go/burrowtest
+    timeout 120 go/burrowtest || failed="$failed go"
+fi
 if [ -n "$failed" ]; then
     echo "FAILED:$failed"
     exit 1
