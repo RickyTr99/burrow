@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <!-- Burrow: a burrow's entrance in a mound. -->
+  <rect width="108" height="108" rx="24" fill="#1A1B20"/>
+  <path fill="#E2B07A" fill-opacity="0.3" d="M24 72c4-21 18-30 30-30s26 9 30 30z"/>
+  <path fill="#E2B07A" d="M43 72v-9a11 11 0 0 1 22 0v9z"/>
+  <path fill="none" stroke="#E2B07A" stroke-width="4" stroke-linecap="round" d="M22 72h64"/>
+</svg>

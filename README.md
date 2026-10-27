@@ -1,4 +1,4 @@
-# Burrow
+# <img src="assets/burrow.svg" width="48" alt="" align="top"> Burrow
 
 Burrow runs the programs of a Linux rootfs (Debian, Arch, ...) as an
 unprivileged user, without root, user namespaces or ptrace. It was written for
