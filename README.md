@@ -28,10 +28,34 @@ Burrow is one freestanding static binary (no libc), linked at a fixed address.
   root); when the kernel can resolve a path the same way, one
   `openat2(RESOLVE_NO_SYMLINKS)` does it.
 
-A trap costs about 1.1 us on a Snapdragon 8 Gen 2 (0.4 us of it is the
-kernel's signal delivery), where a ptrace stop costs tens of microseconds.
-Starting Plasma (90,000 trapped syscalls) spends 2-3% of its CPU time in
-Burrow's overhead.
+## Performance
+
+Measured on a Samsung Galaxy Tab S9+ (Snapdragon 8 Gen 2, Android 16, kernel
+5.15), October 2026.
+
+| Cost of one intercepted syscall                          | Time        |
+|----------------------------------------------------------|-------------|
+| proot: one ptrace stop (microbenchmark)                  | ~56 us      |
+| proot: one stop in real programs (path resolution too)   | 40-64 us    |
+| seccomp user notification, supervisor on the same core   | 9.5 us      |
+| seccomp user notification, supervisor on another core    | ~104 us     |
+| Burrow: one trap                                         | ~1.1 us     |
+
+Of Burrow's 1.1 us, about 0.4 us is the kernel delivering `SIGSYS` and
+returning; a path syscall adds one walk of the path that the kernel would not
+do natively (about 1.5 us when the dentries are cached).
+
+In DroidNux, which moved from proot to Burrow:
+
+- Opening Dolphin under proot took ~20,600 stops and 1.0-1.3 s of proot's CPU
+  time, more than Dolphin's own 0.9 s. Under Burrow it traps ~9,000 syscalls.
+- Starting Plasma under Burrow traps ~90,000 syscalls; Burrow's overhead is
+  2-3% of the CPU time of the start.
+- Loading a web page in Firefox traps ~16,000 syscalls, ~0.15 s of CPU.
+
+The proot figures come from DroidNux's earlier X11 version, so the workloads
+are not the same build of the same desktop: the per-syscall costs compare
+directly, the others give the order of magnitude.
 
 ## What is emulated
 
