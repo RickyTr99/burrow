@@ -25,6 +25,7 @@ static const uint16_t trapped[] = {
     NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
     NR_sendto, NR_recvfrom, NR_getsockname, NR_getpeername, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt, NR_chroot,
+    NR_semget, NR_semctl, NR_semtimedop, NR_semop, NR_msgget, NR_msgctl, NR_msgrcv, NR_msgsnd,
     NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
 };
 
@@ -985,7 +986,15 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_shmget:
     case NR_shmctl:
     case NR_shmat:
-    case NR_shmdt: return emulate_sysv(nr, x);
+    case NR_shmdt:
+    case NR_semget:
+    case NR_semctl:
+    case NR_semtimedop:
+    case NR_semop:
+    case NR_msgget:
+    case NR_msgctl:
+    case NR_msgrcv:
+    case NR_msgsnd: return emulate_sysv(nr, x);
     case NR_execve:
         return emulate_execve(AT_FDCWD, (const char*) x[0], (char* const*) x[1], (char* const*) x[2], 0);
     case NR_execveat:
