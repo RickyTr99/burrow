@@ -268,6 +268,8 @@ long proc_open(int which, long flags);
 void proc_rewind(long fd); /* lseek(fd, 0, SEEK_SET): a made-up file's content made again */
 int proc_maps(const char* host); /* 1 for /proc/<pid>/maps */
 long proc_maps_open(const char* host, long flags);
+int proc_status(const char* host); /* 1 for /proc/<pid>/status */
+long proc_status_open(const char* host, long flags);
 long proc_stat(struct kstat* st);
 long proc_statx(struct kstatx* stx);
 

@@ -410,6 +410,53 @@ long proc_maps_open(const char* host, long flags) {
     return o.fd;
 }
 
+/* /proc/<pid>/status has the app's uid and gid: the guest's instead, as
+ * fake_owner() shows files (ps's user, "own processes" of system monitors). */
+int proc_status(const char* host) {
+    long n = length_of(host);
+    return n > 13 && starts_with(host, "/proc/") && same(host + n - 7, "/status");
+}
+
+/* "Uid:" or "Gid:" and its real, effective, saved and file system ids, @base RUID or RGID. */
+static void ids_line(struct text* t, const char** p, int base, uint32_t real) {
+    put(t, base == RUID ? "Uid:" : "Gid:");
+    for (int i = 0; i < 4; i++) {
+        while (**p == '\t' || **p == ' ') (*p)++;
+        unsigned long v = parse_unsigned(p);
+        put(t, "\t");
+        put_number(t, v == real ? __atomic_load_n(&cfg.ids[base + i], __ATOMIC_RELAXED) : v);
+    }
+}
+
+long proc_status_open(const char* host, long flags) {
+    if ((flags & 3) != O_RDONLY) return -EACCES;
+    long in = sys(NR_openat, AT_FDCWD, host, O_RDONLY | O_CLOEXEC, 0);
+    if (in < 0) return in;
+    char raw[8192], out[8192 + 64];
+    long n = 0, r;
+    while (n < (long) sizeof(raw) - 1 && (r = sys(NR_read, in, raw + n, sizeof(raw) - 1 - n, 0)) > 0) n += r;
+    sys(NR_close, in, 0, 0, 0);
+    raw[n] = 0;
+    struct text t = {out, out + sizeof(out)};
+    for (const char* p = raw; *p;) {
+        if (starts_with(p, "Uid:") || starts_with(p, "Gid:")) {
+            int base = *p == 'U' ? RUID : RGID;
+            p += 4;
+            ids_line(&t, &p, base, base == RUID ? cfg.real_uid : cfg.real_gid);
+            while (*p && *p != '\n') p++;
+        }
+        const char* line = p;
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+        while (line < p && t.at < t.end) *t.at++ = *line++;
+    }
+    long fd = sys(NR_memfd_create, "status", (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0, 0, 0);
+    if (fd < 0) return fd;
+    sys(NR_write, fd, out, t.at - out, 0);
+    sys(NR_lseek, fd, 0, 0 /* SEEK_SET */, 0);
+    return fd;
+}
+
 /* /proc's files show as empty, read-only and root's. */
 long proc_stat(struct kstat* st) {
     long fd = sys(NR_memfd_create, "stat", MFD_CLOEXEC, 0, 0);

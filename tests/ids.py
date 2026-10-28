@@ -29,6 +29,7 @@ ok(os.getuid() == 0 and os.geteuid() == 0 and os.getgid() == 0, "root")
 with open(d + "/root-file", "w"):
     pass
 ok(os.stat(d + "/root-file").st_uid == 0, "a new file is root's")
+ok("Uid:\t0\t0\t0\t0\n" in open("/proc/%d/status" % os.getpid()).read(), "/proc/<pid>/status has root's uid")
 ok(error_of(lambda: os.chown(d + "/root-file", 1000, 1000)) == 0, "chown")
 ok(ctypes.CDLL(None, use_errno=True).prctl(8, 1, 0, 0, 0) == 0, "prctl(PR_SET_KEEPCAPS)")
 
@@ -50,6 +51,9 @@ if pid == 0:
     with open(d + "/user-file", "w"):
         pass
     check(os.stat(d + "/user-file").st_uid == 1000, "a new file is the user's")
+    status = open("/proc/self/status").read()
+    check("Uid:\t1000\t1000\t1000\t1000\n" in status, "/proc/self/status has the user's uid")
+    check("Gid:\t1000\t1000\t1000\t1000\n" in status, "/proc/self/status has the user's gid")
     check(error_of(lambda: os.setuid(0)) == errno.EPERM, "back to root: EPERM")
     check(error_of(lambda: os.chroot("/")) == errno.EPERM, "chroot as a user: EPERM")
     os.write(w, "\n".join(out).encode())

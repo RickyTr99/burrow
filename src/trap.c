@@ -805,6 +805,7 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
  * of the open, as proot lends u+rw. */
 static long open_as_root(long nr, const char* host, long flags, long a, long b) {
     if (!(flags & O_PATH) && proc_maps(host)) return proc_maps_open(host, flags);
+    if (!(flags & O_PATH) && proc_status(host)) return proc_status_open(host, flags);
     long r = sys(nr, AT_FDCWD, host, a, b);
     int proc = r == -EACCES && !(flags & O_PATH) ? proc_file(host) : -1;
     if (proc >= 0) return proc_open(proc, flags);

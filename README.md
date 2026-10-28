@@ -64,7 +64,8 @@ directly, the others give the order of magnitude.
   `getsockname`, `getpeername`), `chroot`.
 - Ids: proot's fake_id0. The guest starts as root, `setuid()` and friends,
   supplementary groups and `SO_PEERCRED` work, and files owned by the real user
-  show as the saved set-user-ID's: root's until a program drops its ids. Root
+  show as the saved set-user-ID's: root's until a program drops its ids; so do
+  the `Uid:` and `Gid:` lines of `/proc/<pid>/status` (`ps`, system monitors). Root
   gets read and write access to the real user's files whatever their mode.
 - Hard links as symlinks, in proot's link2symlink format (rootfses written by
   proot keep working), where the host refuses them (Android).
