@@ -167,11 +167,24 @@ static int plain(const char* p) {
     return 1;
 }
 
+/* Android 14 and 15 (some devices at least) trap openat2 in apps: the SIGSYS
+ * handler makes it ENOSYS, and every path then takes the walk. */
+static int no_openat2;
+
+/* openat2() of @host, -ELOOP (walk it) where the kernel or Android lacks it. */
+static long open_how_host(const char* host, struct open_how* how) {
+    if (no_openat2) return -ELOOP;
+    long r = sys(NR_openat2, AT_FDCWD, host, how, sizeof(*how));
+    if (r != -ENOSYS) return r;
+    no_openat2 = 1;
+    return -ELOOP;
+}
+
 /* Whether the host path @host exists without any symlink (the last component
  * is not followed unless @follow). */
 static long no_symlinks(const char* host, int follow, long extra) {
     struct open_how how = {O_PATH | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW) | extra, 0, RESOLVE_NO_SYMLINKS};
-    long fd = sys(NR_openat2, AT_FDCWD, host, &how, sizeof(how));
+    long fd = open_how_host(host, &how);
     if (fd >= 0) sys(NR_close, fd, 0, 0, 0);
     return fd < 0 ? fd : 0;
 }
@@ -360,7 +373,7 @@ long host_fd(long dirfd, const char* path, int follow, char* host, long* fd) {
     r = host_of(guest, length_of(guest), host);
     if (r < 0) return r;
     struct open_how how = {O_PATH | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW), 0, RESOLVE_NO_SYMLINKS};
-    r = sys(NR_openat2, AT_FDCWD, host, &how, sizeof(how));
+    r = open_how_host(host, &how);
     if (r != -ELOOP) {
         /* ENOENT, ENOTDIR, EACCES: met before any symlink, so the walk would too. */
         if (r >= 0) *fd = r;
@@ -383,7 +396,7 @@ long open_direct(long dirfd, const char* path, long flags, long mode) {
     r = host_of(guest, length_of(guest), host);
     if (r < 0) return r;
     struct open_how how = {(uint64_t) flags, flags & O_CREAT ? (uint64_t) mode & 07777 : 0, RESOLVE_NO_SYMLINKS};
-    r = sys(NR_openat2, AT_FDCWD, host, &how, sizeof(how));
+    r = open_how_host(host, &how);
     stats_step(STATS_OPEN, start);
     return r;
 }

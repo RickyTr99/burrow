@@ -209,6 +209,9 @@ static void launch(long argc, char** argv, char** envp) {
     /* ids[] start at 0: the guest is root, in group root only. */
     cfg.group_count = 1;
 
+    /* Before any path: Android may trap a syscall of ours (openat2), and the
+     * handler turns that into ENOSYS instead of a death by SIGSYS. */
+    install_handler();
     char host[PATH_MAX];
     long r = host_path(AT_FDCWD, workdir, 1, host);
     if (r < 0 || sys(NR_chdir, host, 0, 0, 0) < 0) die("cannot enter ", workdir);
@@ -226,7 +229,6 @@ static void launch(long argc, char** argv, char** envp) {
     uint64_t none = 0;
     sys(NR_rt_sigprocmask, 2 /* SIG_SETMASK */, &none, 0, 8);
 
-    install_handler();
     r = install_filter();
     if (r < 0) die("cannot install the seccomp filter", 0);
     r = emulate_execve(AT_FDCWD, argv[i], argv + i, envp, 0);
