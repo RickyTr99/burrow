@@ -62,6 +62,13 @@ directly, the others give the order of magnitude.
 - Paths: every syscall that takes one, `/proc/<pid>/{exe,cwd,fd,maps,root}`
   with guest paths, Unix socket paths (`bind`, `connect`, `sendto`, `sendmsg`,
   `getsockname`, `getpeername`), `chroot`.
+- Mounts, as bwrap's sandboxes use them: `unshare()` of a user or mount
+  namespace lets a process mount and `chroot`; a bind mount becomes a binding of
+  the process and its children (walked like the rootfs when its source is in
+  it, so its symlinks are guest paths); other mounts and namespaces pretend.
+  The new mount API (`open_tree`...) is `ENOSYS`, and programs fall back.
+- An executable stack, which `ld.so` asks for libraries that want one: Android
+  refuses it, the request succeeds and the stack stays as it is.
 - Ids: proot's fake_id0. The guest starts as root, `setuid()` and friends,
   supplementary groups and `SO_PEERCRED` work, and files owned by the real user
   show as the saved set-user-ID's: root's until a program drops its ids; so do
@@ -130,6 +137,8 @@ as that user anyway.
 - After `chroot()`, SysV shared memory and link2symlink's links of the old root
   are not seen from the new one.
 - Chromium's own sandbox does not work (`--no-sandbox`); Electron apps do.
+- Mounts are bindings of the process: read-only mounts and tmpfs sizes are not
+  enforced, and a mount does not show in `/proc/self/mountinfo`.
 
 ## Tests
 
