@@ -27,10 +27,13 @@ static const char* base_name(const char* p) {
     return b;
 }
 
+int l2s_target(const char* t) {
+    return t[0] == '/' && starts_with(base_name(t), PREFIX);
+}
+
 /* The intermediate and file of the faked hard link @host, if it is one. */
 static int resolve_link(const char* host, char* intermediate, char* final) {
-    if (read_link(host, intermediate) <= 0 || intermediate[0] != '/') return 0;
-    if (!starts_with(base_name(intermediate), PREFIX)) return 0;
+    if (read_link(host, intermediate) <= 0 || !l2s_target(intermediate)) return 0;
     long n = read_link(intermediate, final);
     return n > 5 && final[n - 5] == '.';
 }

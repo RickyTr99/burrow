@@ -43,7 +43,7 @@ static char* put_number(char* at, char* end, unsigned long value) {
 
 long encode_config(char* to, long size, const char* exe, const char* host_exe, const char* name) {
     char* end = to + size;
-    char* at = put(to, end, "4");
+    char* at = put(to, end, "5");
     at = put(at, end, cfg.root);
     at = put(at, end, cfg.self);
     at = put_number(at, end, cfg.real_uid);
@@ -60,6 +60,7 @@ long encode_config(char* to, long size, const char* exe, const char* host_exe, c
     for (int i = 0; i < cfg.bind_count; i++) {
         at = put(at, end, cfg.binds[i].guest);
         at = put(at, end, cfg.binds[i].host);
+        at = put_number(at, end, (unsigned long) cfg.binds[i].walked);
     }
     if (at == 0) return -E2BIG;
     at[-1] = 0;
@@ -88,7 +89,7 @@ static int take_number(const char** s, unsigned long* value) {
 int decode_config(const char* s) {
     char version[8];
     unsigned long v;
-    if (!take(&s, version, sizeof(version)) || !same(version, "4")) return 0;
+    if (!take(&s, version, sizeof(version)) || !same(version, "5")) return 0;
     if (!take(&s, cfg.root, sizeof(cfg.root)) || !take(&s, cfg.self, sizeof(cfg.self))) return 0;
     if (!take_number(&s, &v)) return 0;
     cfg.real_uid = (uint32_t) v;
@@ -114,7 +115,9 @@ int decode_config(const char* s) {
     cfg.bind_count = (int) v;
     for (int i = 0; i < cfg.bind_count; i++) {
         struct bind* b = &cfg.binds[i];
-        if (!take(&s, b->guest, sizeof(b->guest)) || !take(&s, b->host, sizeof(b->host))) return 0;
+        if (!take(&s, b->guest, sizeof(b->guest)) || !take(&s, b->host, sizeof(b->host)) || !take_number(&s, &v))
+            return 0;
+        b->walked = v != 0;
         b->guest_length = length_of(b->guest);
         b->host_length = length_of(b->host);
     }

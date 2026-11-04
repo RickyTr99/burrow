@@ -33,7 +33,7 @@
 #endif
 
 #define PATH_MAX 4096
-#define MAX_BINDS 16
+#define MAX_BINDS 128 /* bwrap's sandboxes (Flatpak) bind a few dozen */
 #define MAX_GROUPS 32
 /* SECCOMP_RET_DATA of Burrow's filter, seen as si_errno: tells our traps
  * from those of the guest's own filters and of Android's. */
@@ -55,6 +55,8 @@ enum {
     NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_getpeername = 205, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
     NR_clone3 = 435, NR_faccessat2 = 439, NR_fchmodat2 = 452, NR_process_vm_readv = 270,
+    NR_umount2 = 39, NR_mount = 40, NR_unshare = 97, NR_open_tree = 428, NR_move_mount = 429, NR_fsopen = 430,
+    NR_fsconfig = 431, NR_fsmount = 432, NR_fspick = 433, NR_mount_setattr = 442,
     NR_shmget = 194, NR_shmctl = 195, NR_shmat = 196, NR_shmdt = 197, NR_msgget = 186, NR_msgctl = 187,
     NR_msgrcv = 188, NR_msgsnd = 189, NR_semget = 190, NR_semctl = 191, NR_semtimedop = 192, NR_semop = 193,
 };
@@ -167,10 +169,14 @@ struct kucontext {
 
 /* -- State ---------------------------------------------------------------------- */
 
+/* A binding from -b leaves what is below it to the kernel: symlinks there are
+ * host paths (/proc's magic links). One from a guest's mount() of a directory
+ * of the rootfs is walked like the rootfs: its symlinks are guest paths. */
 struct bind {
     char guest[256];
     char host[512];
     long guest_length, host_length;
+    int walked;
 };
 
 enum { RUID, EUID, SUID, FSUID, RGID, EGID, SGID, FSGID, ID_COUNT };
@@ -278,6 +284,7 @@ int l2s_stat(const char* host, struct kstat* st);
 int l2s_statx(const char* host, long flags, long mask, struct kstatx* stx);
 long l2s_link(const char* old, const char* new);
 long l2s_unlinked(const char* host);
+int l2s_target(const char* t); /* whether the symlink content @t names a faked hard link */
 
 /* elf.c */
 __attribute__((noreturn)) void load_and_run(long* sp);

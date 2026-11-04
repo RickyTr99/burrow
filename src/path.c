@@ -190,10 +190,12 @@ static long no_symlinks(const char* host, int follow, long extra) {
 }
 
 /* to_host() of the absolute guest path @guest when the kernel resolves it
- * as we would: a plain path, no binding, no symlink. -ELOOP if not. */
+ * as we would: a plain path, no binding left to the kernel, no symlink.
+ * -ELOOP if not. */
 static long probe(const char* guest, int follow, char* host, char* resolved) {
     long n = length_of(guest);
-    if (!plain(guest) || binding_of(guest, n) != 0) return -ELOOP;
+    const struct bind* b = plain(guest) ? binding_of(guest, n) : 0;
+    if (!plain(guest) || (b != 0 && !b->walked)) return -ELOOP;
     long h = host_of(guest, n, host);
     if (h < 0) return h;
     long r = no_symlinks(host, follow, 0);
@@ -250,7 +252,7 @@ static long walk(const char* path, int follow, char* host, char* out) {
         int last = rest[after] == 0;
 
         const struct bind* b = binding_of(out, n);
-        if (b != 0 && !binds_below(out, n)) {
+        if (b != 0 && !b->walked && !binds_below(out, n)) {
             /* The host resolves the rest: /proc's magic links, /dev's... */
             long h = join(host, b->host, b->host_length, out + b->guest_length);
             if (h < 0) return h;
@@ -271,7 +273,13 @@ static long walk(const char* path, int follow, char* host, char* out) {
             long t = sys(NR_readlinkat, AT_FDCWD, host, target, PATH_MAX - 1);
             if (t < 0) return t;
             target[t] = 0;
-            t = unhost(target, t);
+            long u = unhost(target, t);
+            if (u == t && l2s_target(target)) {
+                /* A faked hard link made under another root (a walked binding
+                 * after chroot): its file is a host path, and no directory. */
+                return join(host, target, t, rest + at) < 0 || join(out, out, n, rest + at) < 0 ? -ENAMETOOLONG : 0;
+            }
+            t = u;
             long tail = rest_length - at;
             if (t + tail >= PATH_MAX) return -ENAMETOOLONG;
             memcpy(target + t, rest + at, tail + 1);

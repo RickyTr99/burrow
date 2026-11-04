@@ -27,6 +27,10 @@ static const uint16_t trapped[] = {
     NR_sendto, NR_recvfrom, NR_getsockname, NR_getpeername, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt, NR_chroot,
     NR_semget, NR_semctl, NR_semtimedop, NR_semop, NR_msgget, NR_msgctl, NR_msgrcv, NR_msgsnd,
     NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
+    NR_mount, NR_umount2, NR_unshare,
+    /* ENOSYS: the new mount API takes paths we would not translate (libglnx,
+     * Flatpak's, opened the host's root with open_tree()), and falls back. */
+    NR_open_tree, NR_move_mount, NR_fsopen, NR_fsconfig, NR_fsmount, NR_fspick, NR_mount_setattr,
 };
 
 struct sock_filter {
@@ -43,11 +47,12 @@ struct sock_filter {
 #define RET_ERRNO 0x00050000u
 #define AUDIT_ARCH_AARCH64 0xc00000b7u
 #define DRM_IOCTL_VERSION 0xc0406400u
+#define EXEC_STACK 0x01000007u /* PROT_READ | PROT_WRITE | PROT_EXEC | PROT_GROWSDOWN */
 #define N_TRAPPED (sizeof(trapped) / sizeof(*trapped))
 
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 31];
+    struct sock_filter f[10 + N_TRAPPED + 36];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -95,9 +100,15 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 0};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     /* ioctl(DRM_IOCTL_VERSION) only: the render node is KGSL, see do_drm_version(). */
-    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_ioctl};
+    f[i++] = (struct sock_filter){JEQ, 0, 4, NR_ioctl};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
     f[i++] = (struct sock_filter){JEQ, 0, 1, DRM_IOCTL_VERSION};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* mprotect() of an executable stack only, see do_mprotect(). */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_mprotect};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 1, EXEC_STACK};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     struct {
@@ -835,12 +846,97 @@ static long do_access(long dirfd, const char* path, long mode, long flags) {
     return r;
 }
 
+/* unshare(): namespaces pretend, as Android answers apps. A new user or
+ * mount namespace lets the process mount and chroot, as its root there could
+ * (bwrap's sandboxes); exec() forgets it, the mounts made stay. */
+static int own_namespace;
+
+static int may_mount(void) { return id(EUID) == 0 || own_namespace; }
+
+static long do_unshare(long flags) {
+    if (flags & (0x00020000 /* CLONE_NEWNS */ | 0x10000000 /* CLONE_NEWUSER */)) own_namespace = 1;
+    return 0;
+}
+
+/* The guest path @target resolved into @guest, without a trailing slash. */
+static long mount_point(const char* target, char* guest) {
+    char absolute[PATH_MAX], host[PATH_MAX];
+    if (target == 0) return -EFAULT;
+    if (target[0] == 0) return -ENOENT;
+    long r = guest_absolute(AT_FDCWD, target, absolute);
+    if (r >= 0) r = to_host(absolute, 1, host, guest);
+    if (r < 0) return r;
+    long n = length_of(guest);
+    if (n > 1 && guest[n - 1] == '/') guest[--n] = 0;
+    return n;
+}
+
+/* Whether the host path @host comes from the rootfs or a walked binding (also
+ * one of the first root, after chroot), not from a binding left to the kernel. */
+static int walked_host(const char* host) {
+    for (int i = 0; i < cfg.bind_count; i++) {
+        const struct bind* b = &cfg.binds[i];
+        long n = b->host_length;
+        if (!b->walked && starts_with(host, b->host) && (host[n] == 0 || host[n] == '/' || b->host[n - 1] == '/'))
+            return 0;
+    }
+    return 1;
+}
+
+/* mount(): a bind mount becomes a binding of this process, inherited by its
+ * children; the others (tmpfs, proc, remounts, propagation) pretend. */
+static long do_mount(const char* source, const char* target, long flags) {
+    char host[PATH_MAX], guest[PATH_MAX];
+    if (!may_mount()) return -EPERM;
+    if (!(flags & 4096 /* MS_BIND */) || (flags & 32 /* MS_REMOUNT */)) return 0;
+    if (source == 0) return -EFAULT;
+    long r = host_path(AT_FDCWD, source, 1, host);
+    if (r < 0) return r;
+    long g = mount_point(target, guest), h = length_of(host);
+    if (g < 0) return g;
+    if (g >= (long) sizeof(cfg.binds[0].guest) || h >= (long) sizeof(cfg.binds[0].host)) return -ENAMETOOLONG;
+    int i = 0;
+    while (i < cfg.bind_count && !same(cfg.binds[i].guest, guest)) i++;
+    if (i == MAX_BINDS) return -ENOMEM;
+    struct bind* b = &cfg.binds[i];
+    memcpy(b->guest, guest, g + 1);
+    memcpy(b->host, host, h + 1);
+    b->guest_length = g;
+    b->host_length = h;
+    b->walked = walked_host(host);
+    if (i == cfg.bind_count) cfg.bind_count++;
+    return 0;
+}
+
+/* umount2(): a binding made by mount() goes; anything else pretends. */
+static long do_umount(const char* target) {
+    char guest[PATH_MAX];
+    if (!may_mount()) return -EPERM;
+    long g = mount_point(target, guest);
+    if (g < 0) return g;
+    for (int i = 0; i < cfg.bind_count; i++) {
+        if (!same(cfg.binds[i].guest, guest)) continue;
+        memmove(&cfg.binds[i], &cfg.binds[i + 1], (cfg.bind_count - i - 1) * sizeof(*cfg.binds));
+        cfg.bind_count--;
+        break;
+    }
+    return 0;
+}
+
+/* mprotect() making the stack executable, as ld.so does for a library that
+ * asks for it (PT_GNU_STACK): Android refuses it to apps, and the program
+ * would stop before main. The stack stays as it is. */
+static long do_mprotect(const uint64_t* x) {
+    long r = sys(NR_mprotect, x[0], x[1], x[2], 0);
+    return r == -EACCES ? 0 : r;
+}
+
 /* chroot(): the directory becomes the rootfs, the bindings below it stay.
  * shortcut: SysV shm and link2symlink's links of the old root are not seen
  * from the new one; keep the first root if a chrooted program needs them. */
 static long do_chroot(const char* path) {
     char host[PATH_MAX], absolute[PATH_MAX], guest[PATH_MAX], root[sizeof(cfg.root)];
-    if (id(EUID) != 0) return -EPERM;
+    if (!may_mount()) return -EPERM;
     if (path == 0) return -EFAULT;
     if (path[0] == 0) return -ENOENT;
     long r = guest_absolute(AT_FDCWD, path, absolute);
@@ -865,6 +961,7 @@ static long do_chroot(const char* path) {
         struct bind* k = &cfg.binds[kept++];
         memmove(k->host, b->host, b->host_length + 1);
         k->host_length = b->host_length;
+        k->walked = b->walked;
         k->guest_length = b->guest_length - g;
         memmove(k->guest, b->guest + g, k->guest_length + 1);
     }
@@ -916,6 +1013,10 @@ static long emulate(long nr, const uint64_t* x) {
         ON_HOST(1, sys(NR_chdir, host, 0, 0, 0));
     }
     case NR_chroot: return do_chroot((const char*) x[0]);
+    case NR_mount: return do_mount((const char*) x[0], (const char*) x[1], (long) x[3]);
+    case NR_umount2: return do_umount((const char*) x[0]);
+    case NR_unshare: return do_unshare((long) x[0]);
+    case NR_mprotect: return do_mprotect(x);
     case NR_mkdirat: ON_HOST(0, sys(NR_mkdirat, AT_FDCWD, host, x[2], 0));
     case NR_mknodat: ON_HOST(0, sys(NR_mknodat, AT_FDCWD, host, x[2], x[3]));
     case NR_unlinkat: {
