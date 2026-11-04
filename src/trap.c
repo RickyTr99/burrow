@@ -336,6 +336,8 @@ static long do_readlink(long dirfd, const char* path, char* buf, long size) {
         }
         if (r < 0) return r;
         target[r] = 0;
+        /* A faked hard link (to its intermediate, not to the file as /proc's fd links) is a file, no symlink. */
+        if (l2s_target(target) && r > 5 && target[r - 5] != '.') return -EINVAL;
         /* Another process's exe is Burrow: KWin finds its clients' desktop files by it. */
         long n = same(target, cfg.self) ? remote_exe(guest, target) : 0;
         if (n > 0) r = n;
@@ -818,6 +820,11 @@ static long open_as_root(long nr, const char* host, long flags, long a, long b) 
     if (!(flags & O_PATH) && proc_maps(host)) return proc_maps_open(host, flags);
     if (!(flags & O_PATH) && proc_status(host)) return proc_status_open(host, flags);
     long r = sys(nr, AT_FDCWD, host, a, b);
+    if (r == -ELOOP && (flags & O_NOFOLLOW) && !(flags & O_PATH)) {
+        /* A faked hard link is its file, also unfollowed (ostree's checkouts). */
+        char final[PATH_MAX];
+        if (l2s_file(host, final)) return open_as_root(nr, final, flags, a, b);
+    }
     int proc = r == -EACCES && !(flags & O_PATH) ? proc_file(host) : -1;
     if (proc >= 0) return proc_open(proc, flags);
     if (r != -EACCES || id(FSUID) != 0 || (flags & O_PATH)) return r;
@@ -828,6 +835,24 @@ static long open_as_root(long nr, const char* host, long flags, long a, long b) 
     if (sys(NR_fchmodat, AT_FDCWD, host, (st.mode & 07777) | need, 0) < 0) return r;
     r = sys(nr, AT_FDCWD, host, a, b);
     sys(NR_fchmodat, AT_FDCWD, host, st.mode & 07777, 0);
+    return r;
+}
+
+/* A descriptor opened O_PATH | O_NOFOLLOW on a faked hard link becomes its
+ * file's: the link is that file (ostree checks what it opened is no symlink). */
+static long l2s_path_fd(long fd, long flags) {
+    struct kstat st;
+    if (fd < 0 || (flags & (O_PATH | O_NOFOLLOW)) != (O_PATH | O_NOFOLLOW)) return fd;
+    if (sys(NR_fstat, fd, &st, 0, 0) < 0 || (st.mode & S_IFMT) != S_IFLNK) return fd;
+    char link[32] = "/proc/self/fd/", host[PATH_MAX], final[PATH_MAX];
+    format_unsigned(link + 14, (unsigned long) fd);
+    long n = sys(NR_readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
+    if (n <= 0) return fd;
+    host[n] = 0;
+    if (!l2s_file(host, final)) return fd;
+    long r = sys(NR_openat, AT_FDCWD, final, flags, 0);
+    if (r < 0) return fd;
+    sys(NR_close, fd, 0, 0, 0);
     return r;
 }
 
@@ -985,14 +1010,19 @@ static long emulate(long nr, const uint64_t* x) {
          * glibc's tmpfile()) fall back to a named file. */
         if (flags & 020000000 /* __O_TMPFILE */) return -95 /* EOPNOTSUPP */;
         long r = open_direct(dirfd, path, flags, (long) x[3]);
-        if (r != -ELOOP && r != -EINVAL && r != -EACCES) return r;
+        if (r != -ELOOP && r != -EINVAL && r != -EACCES) return l2s_path_fd(r, flags);
         int follow = !(flags & O_NOFOLLOW) && (flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
-        ON_HOST(follow, open_as_root(NR_openat, host, flags, flags, (long) x[3]));
+        ON_HOST(follow, l2s_path_fd(open_as_root(NR_openat, host, flags, flags, (long) x[3]), flags));
     }
     case NR_openat2: {
         const struct open_how* how = (const struct open_how*) x[2];
+        /* RESOLVE_BENEATH and the like would apply to the host path (EXDEV for
+         * an absolute one): say openat2 is missing, and callers (libglnx's,
+         * Flatpak's) confine the path themselves. */
+        if (how != 0 && how->resolve != 0) return -ENOSYS;
         int follow = !(how->flags & O_NOFOLLOW) && (how->flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
-        ON_HOST(follow, open_as_root(NR_openat2, host, (long) how->flags, (long) how, (long) x[3]));
+        ON_HOST(follow, l2s_path_fd(open_as_root(NR_openat2, host, (long) how->flags, (long) how, (long) x[3]),
+                                    (long) how->flags));
     }
     case NR_newfstatat: return do_stat(dirfd, path, (struct kstat*) x[2], (long) x[3]);
     case NR_fstat: {

@@ -285,6 +285,7 @@ int l2s_statx(const char* host, long flags, long mask, struct kstatx* stx);
 long l2s_link(const char* old, const char* new);
 long l2s_unlinked(const char* host);
 int l2s_target(const char* t); /* whether the symlink content @t names a faked hard link */
+int l2s_file(const char* host, char* final); /* the file of the faked hard link @host, if it is one */
 
 /* elf.c */
 __attribute__((noreturn)) void load_and_run(long* sp);

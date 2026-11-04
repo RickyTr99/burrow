@@ -117,6 +117,10 @@ syscall.restype = ctypes.c_long
 ctypes.set_errno(0)
 r = syscall(428, -100, b"/", 0)  # open_tree(AT_FDCWD, "/", 0)
 ok(r == -1 and ctypes.get_errno() == errno.ENOSYS, "open_tree is ENOSYS")
+how = (ctypes.c_uint64 * 3)(0, 0, 0x08)  # O_RDONLY, RESOLVE_BENEATH
+ctypes.set_errno(0)
+r = syscall(437, -100, b"etc", ctypes.byref(how), 24)
+ok(r == -1 and ctypes.get_errno() == errno.ENOSYS, "openat2 with resolve flags is ENOSYS")
 
 # ld.so's request for an executable stack succeeds (the stack stays as it is on Android).
 page = next(int(line.split("-")[0], 16) for line in open("/proc/self/maps") if line.rstrip().endswith("[stack]"))

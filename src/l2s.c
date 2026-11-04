@@ -50,6 +50,11 @@ static void with_count(const char* final, long count, char* out) {
     for (int i = 1; i <= 4; i++, count /= 10) out[n - i] = (char) ('0' + count % 10);
 }
 
+int l2s_file(const char* host, char* final) {
+    char intermediate[PATH_MAX];
+    return resolve_link(host, intermediate, final);
+}
+
 int l2s_stat(const char* host, struct kstat* st) {
     char intermediate[PATH_MAX], final[PATH_MAX];
     if (!resolve_link(host, intermediate, final)) return 0;
