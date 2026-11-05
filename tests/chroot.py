@@ -1,4 +1,5 @@
 # chroot: a directory of the rootfs becomes the root.
+import ctypes
 import os
 import shutil
 import sys
@@ -28,5 +29,26 @@ if pid == 0:
     os._exit(0 if good else 1)
 ok(os.waitpid(pid, 0)[1] == 0, "the new root, its symlinks and its ..")
 ok(open("/etc/hostname").read() != "inner", "the parent keeps its root")
+pid = os.fork()
+if pid == 0:
+    os.chdir(os.path.dirname(d))
+    os.chroot(d)
+    try:
+        os.getcwd()
+        os._exit(1)
+    except FileNotFoundError:
+        os._exit(0)
+ok(os.waitpid(pid, 0)[1] == 0, "a directory outside the new root has no path (getcwd ENOENT)")
+libc = ctypes.CDLL(None, use_errno=True)
+libc.shmat.restype = ctypes.c_void_p
+segment = libc.shmget(0, 4096, 0o1600)  # IPC_PRIVATE, IPC_CREAT
+ctypes.memmove(libc.shmat(segment, None, 0), b"shared", 6)
+pid = os.fork()
+if pid == 0:
+    os.chroot(d)
+    at = libc.shmat(segment, None, 0)
+    os._exit(0 if at not in (None, ctypes.c_void_p(-1).value) and ctypes.string_at(at, 6) == b"shared" else 1)
+ok(os.waitpid(pid, 0)[1] == 0, "SysV shm of the first root after chroot")
+libc.shmctl(segment, 0, None)  # IPC_RMID
 shutil.rmtree(d)
 sys.exit(1 if fails else 0)

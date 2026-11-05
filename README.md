@@ -134,8 +134,6 @@ as that user anyway.
 
 - `SEM_UNDO` is not kept: a process killed holding a semaphore leaves it taken.
 - `O_TMPFILE` is refused (`EOPNOTSUPP`): programs fall back to a named file.
-- After `chroot()`, SysV shared memory and link2symlink's links of the old root
-  are not seen from the new one.
 - Chromium's own sandbox does not work (`--no-sandbox`); Electron apps do.
 - Mounts are bindings of the process: read-only mounts and tmpfs sizes are not
   enforced, and a mount does not show in `/proc/self/mountinfo`.

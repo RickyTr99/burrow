@@ -353,8 +353,17 @@ static long do_getcwd(char* buf, long size) {
     char host[PATH_MAX], guest[PATH_MAX];
     long r = sys(NR_getcwd, host, PATH_MAX, 0, 0);
     if (r < 0) return r;
-    r = host_to_guest(host, guest, PATH_MAX);
-    if (r < 0) return r;
+    if (!guest_sees(host)) {
+        /* Outside the root (a chroot() moved it): as the kernel says it, glibc's getcwd() then fails with ENOENT. */
+        static const char unreachable[] = "(unreachable)";
+        r = length_of(host);
+        if (r + (long) sizeof(unreachable) > PATH_MAX) return -ENAMETOOLONG;
+        memcpy(guest, unreachable, sizeof(unreachable) - 1);
+        memcpy(guest + sizeof(unreachable) - 1, host, r + 1);
+        r += sizeof(unreachable) - 1;
+    } else if ((r = host_to_guest(host, guest, PATH_MAX)) < 0) {
+        return r;
+    }
     if (r + 1 > size) return -ERANGE;
     memcpy(buf, guest, r + 1);
     return r + 1;
@@ -957,8 +966,8 @@ static long do_mprotect(const uint64_t* x) {
 }
 
 /* chroot(): the directory becomes the rootfs, the bindings below it stay.
- * shortcut: SysV shm and link2symlink's links of the old root are not seen
- * from the new one; keep the first root if a chrooted program needs them. */
+ * SysV IPC stays in the first root (cfg.ipc), link2symlink's links of the
+ * old one are followed by their host paths (path.c). */
 static long do_chroot(const char* path) {
     char host[PATH_MAX], absolute[PATH_MAX], guest[PATH_MAX], root[sizeof(cfg.root)];
     if (!may_mount()) return -EPERM;

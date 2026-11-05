@@ -51,12 +51,11 @@ struct shmid64_ds {
 
 /* @out = the directory, plus "/" @prefix @id if @prefix is not 0. */
 static long ipc_path(char* out, const char* prefix, long id) {
-    if (cfg.root_length + 64 >= PATH_MAX) return -ENAMETOOLONG;
-    memcpy(out, cfg.root, cfg.root_length);
-    char* end = out + cfg.root_length;
-    memcpy(end, "/tmp/.burrow-ipc", 17);
+    long n = length_of(cfg.ipc);
+    if (n + 48 >= PATH_MAX) return -ENAMETOOLONG;
+    memcpy(out, cfg.ipc, n + 1);
+    char* end = out + n;
     if (prefix == 0) return 0;
-    end += 16;
     *end++ = '/';
     long p = length_of(prefix);
     memcpy(end, prefix, p);
@@ -197,7 +196,7 @@ static long shm_dt(uintptr_t addr) {
             while (*p && *p != ' ') p++;
         }
         while (*p == ' ') p++;
-        if (!found && s == addr && length_of(p) < PATH_MAX && starts_with(p, cfg.root)) {
+        if (!found && s == addr && length_of(p) < PATH_MAX && starts_with(p, cfg.ipc)) {
             found = 1;
             start = s;
             end = e;

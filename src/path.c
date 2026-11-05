@@ -56,18 +56,31 @@ static int under(const char* s, const char* prefix, long n) {
     return n > 0 && memcmp(s, prefix, n) == 0 && (s[n] == 0 || s[n] == '/');
 }
 
-long host_to_guest(const char* host, char* out, long size) {
+/* The guest path of @host: its directory there in @guest, the rest of it in
+ * @rest, null when the guest cannot see it. */
+static const char* guest_part(const char* host, const char** guest) {
     const char* rest = 0;
-    const char* guest = "";
     long best = 0;
+    *guest = "";
     if (under(host, cfg.root, cfg.root_length)) best = cfg.root_length, rest = host + best;
     if (cfg.root_alias_length > best && under(host, cfg.root_alias, cfg.root_alias_length))
         best = cfg.root_alias_length, rest = host + best;
     for (int i = 0; i < cfg.bind_count; i++) {
         const struct bind* b = &cfg.binds[i];
         if (b->host_length > best && under(host, b->host, b->host_length))
-            best = b->host_length, rest = host + best, guest = b->guest;
+            best = b->host_length, rest = host + best, *guest = b->guest;
     }
+    return rest;
+}
+
+int guest_sees(const char* host) {
+    const char* guest;
+    return guest_part(host, &guest) != 0;
+}
+
+long host_to_guest(const char* host, char* out, long size) {
+    const char* guest;
+    const char* rest = guest_part(host, &guest);
     if (rest == 0) return copy(out, size, host);
     long g = length_of(guest), r = length_of(rest);
     if (g == 0 && r == 0) return copy(out, size, "/");

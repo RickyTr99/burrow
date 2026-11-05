@@ -43,7 +43,7 @@ static char* put_number(char* at, char* end, unsigned long value) {
 
 long encode_config(char* to, long size, const char* exe, const char* host_exe, const char* name) {
     char* end = to + size;
-    char* at = put(to, end, "5");
+    char* at = put(to, end, "6");
     at = put(at, end, cfg.root);
     at = put(at, end, cfg.self);
     at = put_number(at, end, cfg.real_uid);
@@ -54,6 +54,7 @@ long encode_config(char* to, long size, const char* exe, const char* host_exe, c
     at = put(at, end, name);
     at = put_number(at, end, cfg.dns_port);
     at = put(at, end, cfg.stats);
+    at = put(at, end, cfg.ipc);
     at = put_number(at, end, (unsigned long) cfg.group_count);
     for (int i = 0; i < cfg.group_count; i++) at = put_number(at, end, cfg.groups[i]);
     at = put_number(at, end, (unsigned long) cfg.bind_count);
@@ -89,7 +90,7 @@ static int take_number(const char** s, unsigned long* value) {
 int decode_config(const char* s) {
     char version[8];
     unsigned long v;
-    if (!take(&s, version, sizeof(version)) || !same(version, "5")) return 0;
+    if (!take(&s, version, sizeof(version)) || !same(version, "6")) return 0;
     if (!take(&s, cfg.root, sizeof(cfg.root)) || !take(&s, cfg.self, sizeof(cfg.self))) return 0;
     if (!take_number(&s, &v)) return 0;
     cfg.real_uid = (uint32_t) v;
@@ -104,7 +105,7 @@ int decode_config(const char* s) {
         return 0;
     if (!take_number(&s, &v) || v > 65535) return 0;
     cfg.dns_port = (uint16_t) v;
-    if (!take(&s, cfg.stats, sizeof(cfg.stats))) return 0;
+    if (!take(&s, cfg.stats, sizeof(cfg.stats)) || !take(&s, cfg.ipc, sizeof(cfg.ipc))) return 0;
     if (!take_number(&s, &v) || v > MAX_GROUPS) return 0;
     cfg.group_count = (int) v;
     for (int i = 0; i < cfg.group_count; i++) {

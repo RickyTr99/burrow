@@ -198,6 +198,7 @@ struct config {
     char name[16];           /* its process name: the file execve() was given */
     uint16_t dns_port;       /* the app's DNS proxy on 127.0.0.1, 0 if none */
     char stats[512];         /* the statistics file (-s), a host path; empty if none */
+    char ipc[512];           /* SysV IPC's directory, a host path: in the first root, which chroot() keeps */
 };
 
 extern struct config cfg;
@@ -246,6 +247,8 @@ long guest_absolute(long dirfd, const char* path, char* out);
 long to_host(const char* guest, int follow, char* host, char* resolved);
 long host_path(long dirfd, const char* path, int follow, char* host);
 long host_to_guest(const char* host, char* out, long size);
+/* Whether the guest sees the host path @host (in the root or a binding). */
+int guest_sees(const char* host);
 /* host_path() for a call that creates nothing, in one walk when it can: *@fd
  * is then the file, opened O_PATH (to be closed), else -1 and @host is to be
  * used. ENOENT is final: no directory is checked for a file to create. */

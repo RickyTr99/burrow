@@ -202,6 +202,9 @@ static void launch(long argc, char** argv, char** envp) {
     if (fd < 0 || (cfg.root_length = fd_path(fd, cfg.root, sizeof(cfg.root))) <= 1) die("cannot open the rootfs ", root);
     sys(NR_close, fd, 0, 0, 0);
     set_root_alias();
+    if (cfg.root_length + 17 > (long) sizeof(cfg.ipc)) die("the rootfs path is too long: ", root);
+    memcpy(cfg.ipc, cfg.root, cfg.root_length);
+    memcpy(cfg.ipc + cfg.root_length, "/tmp/.burrow-ipc", 17);
     if (sys(NR_readlinkat, AT_FDCWD, "/proc/self/exe", cfg.self, sizeof(cfg.self) - 1) <= 0)
         die("cannot find Burrow's own binary", 0);
     cfg.real_uid = (uint32_t) sys(NR_getuid, 0, 0, 0, 0);
