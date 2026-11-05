@@ -19,7 +19,7 @@ extern char burrow_gadget[];
 static const uint16_t trapped[] = {
     NR_setxattr, NR_lsetxattr, NR_getxattr, NR_lgetxattr, NR_listxattr, NR_llistxattr, NR_removexattr,
     NR_lremovexattr, NR_getcwd, NR_inotify_add_watch, NR_mknodat, NR_mkdirat, NR_unlinkat, NR_symlinkat,
-    NR_linkat, NR_renameat, NR_statfs, NR_truncate, NR_faccessat, NR_chdir, NR_fchmodat, NR_fchownat, NR_fchown,
+    NR_linkat, NR_renameat, NR_statfs, NR_fstatfs, NR_truncate, NR_faccessat, NR_chdir, NR_fchmodat, NR_fchownat, NR_fchown,
     NR_openat, NR_readlinkat, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
@@ -297,6 +297,35 @@ static void fake_statx(long r, struct kstatx* stx) {
     } while (0)
 
 static int empty(const char* path) { return path != 0 && path[0] == 0; }
+
+#define SYSFS_MAGIC 0x62656572
+#define CGROUP2_MAGIC 0x63677270
+
+/* statfs(), fstatfs(): a binding of a directory onto /sys is sysfs to the guest
+ * (systemd's sd-device refuses other file systems), /sys/fs/cgroup cgroup2. */
+static long do_statfs(long nr, const uint64_t* x) {
+    char host[PATH_MAX], guest[PATH_MAX];
+    long r;
+    if (nr == NR_statfs) {
+        long dirfd = AT_FDCWD;
+        const char* path = (const char*) x[0];
+        if ((r = host_path(dirfd, path, 1, host)) < 0) return r;
+        if ((r = sys(NR_statfs, host, x[1], 0, 0)) < 0) return r;
+    } else {
+        if ((r = sys(NR_fstatfs, x[0], x[1], 0, 0)) < 0) return r;
+        char link[32] = "/proc/self/fd/";
+        format_unsigned(link + 14, (unsigned long) x[0]);
+        long n = sys(NR_readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
+        if (n <= 0) return 0;
+        host[n] = 0;
+    }
+    long* type = (long*) x[1]; /* f_type, the first field */
+    if (*type == SYSFS_MAGIC || *type == CGROUP2_MAGIC || host[0] != '/' || !guest_sees(host) ||
+        host_to_guest(host, guest, PATH_MAX) < 0 || !starts_with(guest, "/sys/"))
+        return 0;
+    *type = starts_with(guest, "/sys/fs/cgroup") && (guest[14] == 0 || guest[14] == '/') ? CGROUP2_MAGIC : SYSFS_MAGIC;
+    return 0;
+}
 
 /* The guest program of the Burrow process named by @guest, a /proc/<pid>/...
  * path, read from its state like peer_ids() does; 0 if none (the launcher). */
@@ -1132,8 +1161,9 @@ static long emulate(long nr, const uint64_t* x) {
         if (path == 0) return sys(NR_utimensat, x[0], 0, x[2], x[3]);
         if (empty(path) && (x[3] & AT_EMPTY_PATH)) return sys(NR_utimensat, x[0], path, x[2], x[3]);
         ON_HOST(!(x[3] & AT_SYMLINK_NOFOLLOW), sys(NR_utimensat, AT_FDCWD, host, x[2], x[3]));
-    case NR_truncate:
     case NR_statfs:
+    case NR_fstatfs: return do_statfs(nr, x);
+    case NR_truncate:
     case NR_setxattr:
     case NR_lsetxattr:
     case NR_getxattr:

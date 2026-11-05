@@ -67,8 +67,23 @@ static const char* guest_part(const char* host, const char** guest) {
         best = cfg.root_alias_length, rest = host + best;
     for (int i = 0; i < cfg.bind_count; i++) {
         const struct bind* b = &cfg.binds[i];
-        if (b->host_length > best && under(host, b->host, b->host_length))
-            best = b->host_length, rest = host + best, *guest = b->guest;
+        long n = b->host_length;
+        if (n > best && under(host, b->host, n)) {
+            best = n, rest = host + n, *guest = b->guest;
+        } else if (cfg.root_alias_length > 0) {
+            /* A binding of a directory of the rootfs, named by the rootfs's other path
+             * (/data/data or /data/user/0): the kernel may give either. */
+            int in_root = under(b->host, cfg.root, cfg.root_length);
+            if (!in_root && !under(b->host, cfg.root_alias, cfg.root_alias_length)) continue;
+            const char* other = in_root ? cfg.root_alias : cfg.root;
+            long from = in_root ? cfg.root_length : cfg.root_alias_length;
+            long to = in_root ? cfg.root_alias_length : cfg.root_length;
+            long tail = n - from;
+            n = to + tail;
+            if (n > best && under(host, other, to) && memcmp(host + to, b->host + from, tail) == 0 &&
+                (host[n] == 0 || host[n] == '/'))
+                best = n, rest = host + n, *guest = b->guest;
+        }
     }
     return rest;
 }
