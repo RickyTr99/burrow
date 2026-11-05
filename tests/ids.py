@@ -1,6 +1,7 @@
 # Ids: the guest runs as root and can become another user.
 import ctypes
 import errno
+import fcntl
 import os
 import shutil
 import sys
@@ -30,6 +31,9 @@ with open(d + "/root-file", "w"):
     pass
 ok(os.stat(d + "/root-file").st_uid == 0, "a new file is root's")
 ok("Uid:\t0\t0\t0\t0\n" in open("/proc/%d/status" % os.getpid()).read(), "/proc/<pid>/status has root's uid")
+fd = os.open("/proc/%d/status" % os.getpid(), os.O_RDONLY)
+ok(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY, "/proc/<pid>/status opens read-only (Electron)")
+os.close(fd)
 ok(error_of(lambda: os.chown(d + "/root-file", 1000, 1000)) == 0, "chown")
 ok(ctypes.CDLL(None, use_errno=True).prctl(8, 1, 0, 0, 0) == 0, "prctl(PR_SET_KEEPCAPS)")
 

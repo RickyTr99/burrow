@@ -18,6 +18,8 @@
 #define MFD_CLOEXEC 1
 #define CLOCK_REALTIME 0
 #define CLOCK_BOOTTIME 7
+#define O_RDWR 2
+#define O_TMPFILE (020000000 | O_DIRECTORY)
 
 struct utsname {
     char sysname[65], nodename[65], release[65], version[65], machine[65], domainname[65];
@@ -341,6 +343,35 @@ void proc_rewind(long fd) {
     if (which < sizeof(files) / sizeof(*files)) write_file(fd, (int) which);
 }
 
+/* An unnamed file to write a rewritten /proc file in: in the rootfs' /tmp,
+ * a memfd where O_TMPFILE fails. */
+static long scratch(const char* name, long flags) {
+    char tmp[PATH_MAX];
+    if (cfg.root_length + 5 < PATH_MAX) {
+        memcpy(tmp, cfg.root, cfg.root_length);
+        memcpy(tmp + cfg.root_length, "/tmp", 5);
+        long fd = sys(NR_openat, AT_FDCWD, tmp, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+        if (fd >= 0) return fd;
+    }
+    return sys(NR_memfd_create, name, (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0, 0, 0);
+}
+
+/* The filled @fd of scratch() as open() of the real file gives it: read-only,
+ * at the start. Electron's main process stops on a writable descriptor of
+ * /proc/<pid>/status (Chromium checks the access mode with F_GETFL). Android's
+ * SELinux refuses reopening a memfd: that one stays writable. */
+static long read_only(long fd, long flags) {
+    char link[32] = "/proc/self/fd/";
+    format_unsigned(link + 14, (unsigned long) fd);
+    long r = sys(NR_openat, AT_FDCWD, link, O_RDONLY | (flags & O_CLOEXEC), 0);
+    if (r < 0) {
+        sys(NR_lseek, fd, 0, 0 /* SEEK_SET */, 0);
+        return fd;
+    }
+    sys(NR_close, fd, 0, 0, 0);
+    return r;
+}
+
 /* /proc/<pid>/maps names the rootfs' files by their host paths: their guest
  * paths instead (VLC finds its plugins from libvlccore's, gdb its libraries). */
 int proc_maps(const char* host) {
@@ -386,7 +417,7 @@ long proc_maps_open(const char* host, long flags) {
     if (in < 0) return in;
     struct output o;
     o.used = 0;
-    o.fd = sys(NR_memfd_create, "maps", (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0, 0, 0);
+    o.fd = scratch("maps", flags);
     if (o.fd < 0) {
         sys(NR_close, in, 0, 0, 0);
         return o.fd;
@@ -406,8 +437,7 @@ long proc_maps_open(const char* host, long flags) {
     if (used > 0) maps_line(&o, line, used, guest);
     sys(NR_write, o.fd, o.buf, o.used, 0);
     sys(NR_close, in, 0, 0, 0);
-    sys(NR_lseek, o.fd, 0, 0 /* SEEK_SET */, 0);
-    return o.fd;
+    return read_only(o.fd, flags);
 }
 
 /* /proc/<pid>/status has the app's uid and gid: the guest's instead, as
@@ -450,11 +480,10 @@ long proc_status_open(const char* host, long flags) {
         if (*p) p++;
         while (line < p && t.at < t.end) *t.at++ = *line++;
     }
-    long fd = sys(NR_memfd_create, "status", (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0, 0, 0);
+    long fd = scratch("status", flags);
     if (fd < 0) return fd;
     sys(NR_write, fd, out, t.at - out, 0);
-    sys(NR_lseek, fd, 0, 0 /* SEEK_SET */, 0);
-    return fd;
+    return read_only(fd, flags);
 }
 
 /* /proc's files show as empty, read-only and root's. */
