@@ -1,4 +1,6 @@
-# <img src="assets/burrow.svg" width="48" alt="" align="top"> Burrow
+<p align="center">
+  <img src=".github/banner.png" alt="Burrow" width="640">
+</p>
 
 Burrow runs the programs of a Linux rootfs (Debian, Arch, ...) as an
 unprivileged user, without root, user namespaces or ptrace. It was written for
@@ -7,9 +9,9 @@ desktop on Android this way, and is usable wherever proot is: Android apps,
 Termux, locked-down arm64 Linux machines.
 
 Like proot, it shows the guest a rootfs as `/`, bindings of host directories
-into it, and a fake root user. Unlike proot, it does not stop the process for
-every syscall it emulates: a seccomp filter traps them with `SIGSYS`, and
-Burrow's handler emulates them in the guest process itself.
+and a fake root user. Unlike proot, it does not stop the process for every
+syscall: a seccomp filter traps them with `SIGSYS` and a handler emulates them
+in the guest process itself, about 50 times faster.
 
 ## How it works
 
@@ -47,15 +49,13 @@ do natively (about 1.5 us when the dentries are cached).
 
 In DroidNux, which moved from proot to Burrow:
 
-- Opening Dolphin under proot took ~20,600 stops and 1.0-1.3 s of proot's CPU
-  time, more than Dolphin's own 0.9 s. Under Burrow it traps ~9,000 syscalls.
-- Starting Plasma under Burrow traps ~90,000 syscalls; Burrow's overhead is
-  2-3% of the CPU time of the start.
+- Opening Dolphin took ~20,600 stops and 1.0-1.3 s of proot's CPU time, more
+  than Dolphin's own 0.9 s. Under Burrow it traps ~9,000 syscalls.
+- Starting Plasma traps ~90,000 syscalls: 2-3% of the CPU time of the start.
 - Loading a web page in Firefox traps ~16,000 syscalls, ~0.15 s of CPU.
 
-The proot figures come from DroidNux's earlier X11 version, so the workloads
-are not the same build of the same desktop: the per-syscall costs compare
-directly, the others give the order of magnitude.
+The proot figures come from DroidNux's earlier X11 version: the per-syscall
+costs compare directly, the others give the order of magnitude.
 
 ## What is emulated
 
@@ -74,8 +74,9 @@ directly, the others give the order of magnitude.
   show as the saved set-user-ID's: root's until a program drops its ids; so do
   the `Uid:` and `Gid:` lines of `/proc/<pid>/status` (`ps`, system monitors). Root
   gets read and write access to the real user's files whatever their mode.
-- Hard links as symlinks, in proot's link2symlink format (rootfses written by
-  proot keep working), where the host refuses them (Android).
+- Hard links, where the host refuses them (Android), as symlinks in proot's
+  link2symlink format (rootfses written by proot keep working). They behave as
+  files: `readlink()` fails and `O_NOFOLLOW` opens them (ostree, Flatpak).
 - SysV shared memory, semaphores and message queues, as files in the rootfs's
   `/tmp/.burrow-ipc` (`fakeroot-sysv` works).
 - On Android: the files of `/proc` SELinux refuses to apps, made up
@@ -133,7 +134,8 @@ as that user anyway.
 ## Limits
 
 - `SEM_UNDO` is not kept: a process killed holding a semaphore leaves it taken.
-- `O_TMPFILE` is refused (`EOPNOTSUPP`): programs fall back to a named file.
+- `O_TMPFILE` is refused (`EOPNOTSUPP`) and `openat2()` with resolve flags is
+  `ENOSYS`: programs fall back.
 - Chromium's own sandbox does not work (`--no-sandbox`); Electron apps do.
 - Mounts are bindings of the process: read-only mounts and tmpfs sizes are not
   enforced, and a mount does not show in `/proc/self/mountinfo`.
