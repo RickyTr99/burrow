@@ -231,6 +231,8 @@ static void launch(long argc, char** argv, char** envp) {
     /* The app's blocked signals (SIGQUIT, SIGUSR1, SIGPIPE, 32: glibc's SIGCANCEL) are not the guest's. */
     uint64_t none = 0;
     sys(NR_rt_sigprocmask, 2 /* SIG_SETMASK */, &none, 0, 8);
+    /* Nor the app's umask (077): files made in the guest (apt's keyrings, /etc) must stay readable to its users. */
+    sys(NR_umask, 022, 0, 0, 0);
 
     r = install_filter();
     if (r < 0) die("cannot install the seccomp filter", 0);
