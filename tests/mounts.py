@@ -98,6 +98,30 @@ def sandbox():
 ok(in_child(sandbox), "bindings into a new root, then chroot")
 
 
+def recursive():
+    """A recursive bind takes the bindings below its source along (Flatpak's /dev and /dev/dri)."""
+    os.makedirs(d + "/outer/inner")
+    os.makedirs(d + "/root/dev")
+    if mount(d + "/src", d + "/outer/inner") or mount(d + "/outer", d + "/root/dev", flags=MS_BIND | MS_REC):
+        return False
+    rec = open(d + "/root/dev/inner/sub/file").read() == "bound"
+    if mount(d + "/outer", d + "/root/mnt"):
+        return False
+    plain = os.listdir(d + "/root/mnt/inner") == []
+    # Into a new root built inside the source: the root's own bindings stay out.
+    os.makedirs(d + "/root/up")
+    if mount(d, d + "/root/up", flags=MS_BIND | MS_REC):
+        return False
+    return (rec and plain and open(d + "/root/up/outer/inner/sub/file").read() == "bound"
+            and not os.path.exists(d + "/root/up/root/dev/inner"))
+
+
+ok(in_child(recursive), "a recursive bind takes the bindings below, a plain one not")
+# Flatpak shares /sys/dev and the others only if access() lets read them.
+ok(all(os.access(p, os.R_OK | os.X_OK) for p in ("/sys/class", "/sys/dev", "/sys/devices") if os.path.isdir(p)),
+   "the directories of /sys are readable")
+
+
 def as_user(unshare):
     def f():
         os.setgid(1000)

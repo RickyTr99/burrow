@@ -894,7 +894,19 @@ static long l2s_path_fd(long fd, long flags) {
     return r;
 }
 
-/* faccessat() and faccessat2(): the made-up files of /proc are readable. */
+/* Whether the host path @host is a directory of the host's /sys that its mode
+ * lets everyone read: SELinux denies apps most of them (/sys/dev, /sys/class),
+ * where Linux lets anyone list them. Flatpak shares only those access() lets
+ * read, and Mesa finds the GPU by the bindings below them (/sys/dev/char). */
+static int readable_sysfs_dir(const char* host) {
+    struct kstat st;
+    if (!starts_with(host, "/sys/")) return 0;
+    if (sys(NR_newfstatat, AT_FDCWD, host, &st, 0) < 0) return 0;
+    return (st.mode & S_IFMT) == S_IFDIR && (st.mode & 05) == 05;
+}
+
+/* faccessat() and faccessat2(): the made-up files of /proc are readable, and
+ * so are the directories of /sys as on Linux. */
 static long do_access(long dirfd, const char* path, long mode, long flags) {
     char host[PATH_MAX];
     long fd, r = host_fd(dirfd, path, !(flags & AT_SYMLINK_NOFOLLOW), host, &fd);
@@ -902,10 +914,11 @@ static long do_access(long dirfd, const char* path, long mode, long flags) {
     if (fd >= 0) {
         r = sys(NR_faccessat2, fd, "", mode, (flags & ~AT_SYMLINK_NOFOLLOW) | AT_EMPTY_PATH);
         sys(NR_close, fd, 0, 0, 0);
-        return r;
+    } else {
+        r = flags ? sys(NR_faccessat2, AT_FDCWD, host, mode, flags) : sys(NR_faccessat, AT_FDCWD, host, mode, 0);
+        if (r == -EACCES && !(mode & 3 /* W_OK | X_OK */) && proc_file(host) >= 0) return 0;
     }
-    r = flags ? sys(NR_faccessat2, AT_FDCWD, host, mode, flags) : sys(NR_faccessat, AT_FDCWD, host, mode, 0);
-    if (r == -EACCES && !(mode & 3 /* W_OK | X_OK */) && proc_file(host) >= 0) return 0;
+    if (r == -EACCES && !(mode & 2 /* W_OK */) && readable_sysfs_dir(host)) return 0;
     return r;
 }
 
@@ -946,28 +959,57 @@ static int walked_host(const char* host) {
     return 1;
 }
 
-/* mount(): a bind mount becomes a binding of this process, inherited by its
- * children; the others (tmpfs, proc, remounts, propagation) pretend. */
-static long do_mount(const char* source, const char* target, long flags) {
-    char host[PATH_MAX], guest[PATH_MAX];
-    if (!may_mount()) return -EPERM;
-    if (!(flags & 4096 /* MS_BIND */) || (flags & 32 /* MS_REMOUNT */)) return 0;
-    if (source == 0) return -EFAULT;
-    long r = host_path(AT_FDCWD, source, 1, host);
-    if (r < 0) return r;
-    long g = mount_point(target, guest), h = length_of(host);
-    if (g < 0) return g;
+/* Binds the guest path @guest (@g bytes) to the host path @host (@h bytes),
+ * replacing a binding of the same guest path. */
+static long add_binding(const char* guest, long g, const char* host, long h, int walked) {
     if (g >= (long) sizeof(cfg.binds[0].guest) || h >= (long) sizeof(cfg.binds[0].host)) return -ENAMETOOLONG;
     int i = 0;
     while (i < cfg.bind_count && !same(cfg.binds[i].guest, guest)) i++;
     if (i == MAX_BINDS) return -ENOMEM;
     struct bind* b = &cfg.binds[i];
-    memcpy(b->guest, guest, g + 1);
-    memcpy(b->host, host, h + 1);
+    memmove(b->guest, guest, g + 1);
+    memmove(b->host, host, h + 1);
     b->guest_length = g;
     b->host_length = h;
-    b->walked = walked_host(host);
+    b->walked = walked;
     if (i == cfg.bind_count) cfg.bind_count++;
+    return 0;
+}
+
+/* mount(): a bind mount becomes a binding of this process, inherited by its
+ * children; the others (tmpfs, proc, remounts, propagation) pretend. A
+ * recursive one takes the bindings below its source along, as the kernel
+ * takes the mounts: Flatpak binds /dev and /sys whole, and the GPU's render
+ * node and sysfs entries are bindings below them. */
+static long do_mount(const char* source, const char* target, long flags) {
+    char host[PATH_MAX], guest[PATH_MAX], from[PATH_MAX], below[PATH_MAX];
+    if (!may_mount()) return -EPERM;
+    if (!(flags & 4096 /* MS_BIND */) || (flags & 32 /* MS_REMOUNT */)) return 0;
+    if (source == 0) return -EFAULT;
+    long r = host_path(AT_FDCWD, source, 1, host);
+    if (r < 0) return r;
+    long g = mount_point(target, guest);
+    if (g < 0) return g;
+    long f = (flags & 16384 /* MS_REC */) ? mount_point(source, from) : -1;
+    int n = cfg.bind_count; /* the bindings so far: binding / below itself must not copy the new one */
+    r = add_binding(guest, g, host, length_of(host), walked_host(host));
+    if (r < 0 || f < 0) return r;
+    if (f == 1) f = 0; /* "/": every binding is below it */
+    for (int i = 0; i < n; i++) {
+        const struct bind* b = &cfg.binds[i];
+        if (b->guest_length <= f || memcmp(b->guest, from, f) != 0 || b->guest[f] != '/') continue;
+        /* Not the new root's own bindings, when it is built inside the source
+         * (bwrap's below /tmp, and Flatpak binds /tmp). */
+        long d = 0;
+        for (long k = 0; k < g && guest[k] == b->guest[k]; k++)
+            if (k > 0 && guest[k] == '/') d = k;
+        if (d > f) continue;
+        if (g + b->guest_length - f >= (long) sizeof(below)) return -ENAMETOOLONG;
+        memcpy(below, guest, g);
+        memcpy(below + g, b->guest + f, b->guest_length - f + 1);
+        r = add_binding(below, g + b->guest_length - f, b->host, b->host_length, b->walked);
+        if (r < 0) return r;
+    }
     return 0;
 }
 
