@@ -39,6 +39,24 @@ if pid == 0:
     except FileNotFoundError:
         os._exit(0)
 ok(os.waitpid(pid, 0)[1] == 0, "a directory outside the new root has no path (getcwd ENOENT)")
+ready_r, ready_w = os.pipe()
+done_r, done_w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.chroot(d)
+    inner = os.fork()  # its child, which did not call chroot() itself
+    if inner == 0:
+        os.write(ready_w, b"%d\n" % os.getpid())
+        os.read(done_r, 1)
+        os._exit(0)
+    os.waitpid(inner, 0)
+    os._exit(0)
+inner = int(os.read(ready_r, 32))
+ok(open("/proc/%d/root/etc/marker" % pid).read() == "inner", "/proc/<pid>/root of a chroot()ed process")
+ok(open("/proc/%d/root/etc/marker" % inner).read() == "inner", "/proc/<pid>/root of its child")
+ok(os.path.exists("/proc/%d/root/etc/hostname" % os.getpid()), "/proc/<pid>/root of this one")
+os.write(done_w, b"x")
+os.waitpid(pid, 0)
 libc = ctypes.CDLL(None, use_errno=True)
 libc.shmat.restype = ctypes.c_void_p
 segment = libc.shmget(0, 4096, 0o1600)  # IPC_PRIVATE, IPC_CREAT

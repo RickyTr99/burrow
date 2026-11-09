@@ -1074,6 +1074,7 @@ static long do_chroot(const char* path) {
     memcpy(cfg.root, root, n + 1);
     cfg.root_length = n;
     set_root_alias();
+    record_root();
     return 0;
 }
 

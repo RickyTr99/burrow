@@ -363,16 +363,96 @@ static const char* proc_root_rest(const char* p) {
     return q + 4;
 }
 
+/* Fields 4 (parent) and 22 (start time) of /proc/<@pid>/stat, "self" for 0. */
+static int pid_stat(unsigned long pid, unsigned long* parent, unsigned long* start) {
+    char path[40] = "/proc/self", buf[1024];
+    memcpy(pid ? format_unsigned(path + 6, pid) : path + 10, "/stat", 6);
+    long fd = sys(NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return 0;
+    long n = sys(NR_read, fd, buf, sizeof(buf) - 1, 0);
+    sys(NR_close, fd, 0, 0, 0);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    /* The name in parentheses may hold anything: the fields follow the last ")". */
+    const char* p = 0;
+    for (long i = 0; i < n; i++)
+        if (buf[i] == ')') p = buf + i;
+    if (p == 0 || n - (p - buf) < 4) return 0;
+    p += 4; /* ") S " */
+    for (int field = 4; *p != 0; field++) {
+        if (field == 4) *parent = parse_unsigned(&p);
+        if (field == 22) {
+            *start = parse_unsigned(&p);
+            return 1;
+        }
+        while (*p != 0 && *p != ' ') p++;
+        if (*p == ' ') p++;
+    }
+    return 0;
+}
+
+/* The record of a chroot()ed process, <first root>/tmp/.burrow-roots/<pid>-<start
+ * time>, a symlink to its root (host path): the start time tells a reused pid. */
+static long root_record(char* out, unsigned long pid, unsigned long start) {
+    long n = length_of(cfg.ipc) - 3; /* "/tmp/.burrow-ipc" -> "/tmp/.burrow-" */
+    if (n < 0 || n + 6 + 48 > PATH_MAX) return -ENAMETOOLONG;
+    memcpy(out, cfg.ipc, n);
+    memcpy(out + n, "roots", 6);
+    if (pid == 0) return 0;
+    char* e = out + n + 5;
+    *e++ = '/';
+    e = format_unsigned(e, pid);
+    *e++ = '-';
+    format_unsigned(e, start);
+    return 0;
+}
+
+void record_root(void) {
+    unsigned long parent, start;
+    char path[PATH_MAX];
+    if (!pid_stat(0, &parent, &start) || root_record(path, 0, 0) < 0) return;
+    sys(NR_mkdirat, AT_FDCWD, path, 0700, 0);
+    root_record(path, (unsigned long) sys(NR_getpid, 0, 0, 0, 0), start);
+    sys(NR_unlinkat, AT_FDCWD, path, 0, 0);
+    sys(NR_symlinkat, cfg.root, AT_FDCWD, path, 0);
+}
+
+/* The guest path, in this process's root, of the root of process @pid (or of
+ * its nearest ancestor that called chroot()) into @out; 0 if none is known or
+ * this root does not hold it. shortcut: bindings of that root are not seen
+ * below it; enough for the files chroot()'s caller put there (.flatpak-info). */
+static int other_root(unsigned long pid, char* out) {
+    char path[PATH_MAX], root[PATH_MAX];
+    for (int depth = 0; depth < 32 && pid > 1; depth++) {
+        unsigned long parent = 0, start = 0;
+        if (!pid_stat(pid, &parent, &start) || root_record(path, pid, start) < 0) return 0;
+        long n = sys(NR_readlinkat, AT_FDCWD, path, root, sizeof(root) - 1);
+        if (n > 0) {
+            root[n] = 0;
+            if (n <= cfg.root_length || memcmp(root, cfg.root, cfg.root_length) != 0 || root[cfg.root_length] != '/')
+                return 0;
+            return copy(out, PATH_MAX, root + cfg.root_length) >= 0;
+        }
+        pid = parent;
+    }
+    return 0;
+}
+
 long to_host(const char* guest, int follow, char* host, char* resolved) {
     char scratch[PATH_MAX];
     if (resolved == 0) resolved = scratch;
-    /* A guest process's root is the rootfs, not Android's "/" (xdg-desktop-portal
-     * opens it to tell sandboxed apps). The link itself stays one: readlink()
-     * gives "/". shortcut: Android's own processes get the rootfs too. */
+    /* A guest process's root is the rootfs, not Android's "/", or the directory
+     * it chroot()ed into (xdg-desktop-portal and flatpak-portal open it to tell
+     * sandboxed apps by their /.flatpak-info). The link itself stays one:
+     * readlink() gives "/". shortcut: Android's own processes get the rootfs too. */
     const char* rest = proc_root_rest(guest);
     if (rest != 0 && (rest[0] != 0 || follow)) {
         char from_root[PATH_MAX];
-        if (copy(from_root, PATH_MAX, rest[0] ? rest : "/") < 0) return -ENAMETOOLONG;
+        const char* q = guest + 6;
+        long n = 0;
+        if (*q >= '0' && *q <= '9' && other_root(parse_unsigned(&q), from_root)) n = length_of(from_root);
+        if (n + length_of(rest) + 2 > PATH_MAX) return -ENAMETOOLONG;
+        memcpy(from_root + n, rest[0] ? rest : "/", length_of(rest[0] ? rest : "/") + 1);
         return to_host(from_root, follow, host, resolved);
     }
     if (is_self_exe(guest) && follow) {

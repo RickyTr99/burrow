@@ -247,6 +247,8 @@ long guest_absolute(long dirfd, const char* path, char* out);
 long to_host(const char* guest, int follow, char* host, char* resolved);
 long host_path(long dirfd, const char* path, int follow, char* host);
 long host_to_guest(const char* host, char* out, long size);
+/* Records this process's root after chroot(), for /proc/<pid>/root in other processes. */
+void record_root(void);
 /* Whether the guest sees the host path @host (in the root or a binding). */
 int guest_sees(const char* host);
 /* host_path() for a call that creates nothing, in one walk when it can: *@fd
