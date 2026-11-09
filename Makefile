@@ -28,7 +28,8 @@ $(OUT): $(SOURCES) src/burrow.h
 
 check: $(OUT)
 	@test -n "$(ROOTFS)" || { echo "make check ROOTFS=..."; exit 1; }
-	./$(OUT) -r $(ROOTFS) -b /dev -b /proc -b /sys -b $(CURDIR)/tests:/tmp/burrow-tests -w /root -- \
+	./$(OUT) -r $(ROOTFS) -b /dev -b /proc -b /sys -b $(CURDIR)/tests:/tmp/burrow-tests \
+		-x /tmp/burrow-tests/x86-interp.py -w /root -- \
 		/usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh /tmp/burrow-tests/run.sh
 
 clean:

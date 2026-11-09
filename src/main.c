@@ -2,7 +2,7 @@
  * Entry point: the loader of an emulated execve() when BURROW is in the
  * environment, the launcher otherwise:
  *
- *   burrow -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [-s STATS_FILE] [--] PROGRAM [ARG]...
+ *   burrow -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [-s STATS_FILE] [-x X86_INTERPRETER] [--] PROGRAM [ARG]...
  *
  * The launcher stays as the parent of the guest's process tree, like proot
  * with --kill-on-exit: when the program exits, or the launcher gets SIGTERM
@@ -194,9 +194,15 @@ static void launch(long argc, char** argv, char** envp) {
             const char* p = argv[++i];
             if (p[0] != '/' || copy(cfg.stats, sizeof(cfg.stats), p) < 0) die("bad statistics file ", p);
         }
+        else if (same(a, "-x")) {
+            const char* p = argv[++i];
+            if (p[0] != '/' || copy(cfg.x86, sizeof(cfg.x86), p) < 0) die("bad x86 interpreter ", p);
+        }
         else die("unknown option ", a);
     }
-    if (root == 0 || i >= argc) die("usage: burrow -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] [-d DNS_PORT] [-s STATS_FILE] PROGRAM [ARG]...", 0);
+    if (root == 0 || i >= argc)
+        die("usage: burrow -r ROOTFS [-b HOST[:GUEST]]... [-w DIR] [-d DNS_PORT] [-s STATS_FILE] [-x X86_INTERPRETER] PROGRAM [ARG]...", 0);
+    cfg.exec_fd = -1;
 
     long fd = sys(NR_openat, AT_FDCWD, root, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
     if (fd < 0 || (cfg.root_length = fd_path(fd, cfg.root, sizeof(cfg.root))) <= 1) die("cannot open the rootfs ", root);

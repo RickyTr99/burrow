@@ -105,7 +105,7 @@ native library directory, so DroidNux ships it as `libburrow.so`.
 ## Use
 
 ```sh
-burrow -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [-s STATS_FILE] [--] PROGRAM [ARG]...
+burrow -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [-s STATS_FILE] [-x X86_INTERPRETER] [--] PROGRAM [ARG]...
 ```
 
 - `-r ROOTFS`: the rootfs directory.
@@ -114,6 +114,8 @@ burrow -r ROOTFS [-b HOST[:GUEST]]... [-w GUEST_DIR] [-d DNS_PORT] [-s STATS_FIL
 - `-d DNS_PORT`: send DNS queries to 127.0.0.53 to `127.0.0.1:DNS_PORT`.
 - `-s STATS_FILE`: count the traps and the handler's time per syscall, for all
   the guest's processes; `tools/stats.py STATS_FILE` prints them.
+- `-x X86_INTERPRETER`: run x86 and x86-64 programs with this guest program,
+  as binfmt_misc with flags `POC` would (FEX: `-x /usr/bin/FEX`).
 
 Burrow stays the parent of the guest's process tree: when the program exits,
 or Burrow gets `SIGTERM`, it kills what is left and exits with the program's

@@ -199,6 +199,8 @@ struct config {
     uint16_t dns_port;       /* the app's DNS proxy on 127.0.0.1, 0 if none */
     char stats[512];         /* the statistics file (-s), a host path; empty if none */
     char ipc[512];           /* SysV IPC's directory, a host path: in the first root, which chroot() keeps */
+    char x86[512];           /* the x86 programs' interpreter (-x, FEX), a guest path; empty if none */
+    long exec_fd;            /* the program's open file for the interpreter (AT_EXECFD), -1 if none */
 };
 
 extern struct config cfg;
