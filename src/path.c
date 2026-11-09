@@ -438,6 +438,49 @@ static int other_root(unsigned long pid, char* out) {
     return 0;
 }
 
+/* /proc/<pid>/fd/<n>/<rest> (self and thread-self too), a path through a
+ * directory fd: the kernel would follow the magic link to the fd's host
+ * directory and never see a binding inside it (a bound file, say: its
+ * placeholder in the rootfs would be opened instead). Gives in @out the guest
+ * path it means, returns 1; 0 when @p is no such path or the guest cannot name
+ * the directory, so that the kernel resolves it as before. The link alone,
+ * with no <rest>, stays a magic link. */
+static long proc_fd_guest(const char* p, char* out) {
+    if (!starts_with(p, "/proc/")) return 0;
+    const char* q = p + 6;
+    if (starts_with(q, "self/")) {
+        q += 5;
+    } else if (starts_with(q, "thread-self/")) {
+        q += 12;
+    } else {
+        const char* digits = q;
+        while (*q >= '0' && *q <= '9') q++;
+        if (q == digits || *q++ != '/') return 0;
+    }
+    if (!starts_with(q, "fd/")) return 0;
+    q += 3;
+    const char* digits = q;
+    while (*q >= '0' && *q <= '9') q++;
+    if (q == digits || *q != '/' || only_slashes(q)) return 0;
+
+    char link[64], dir[PATH_MAX];
+    long n = q - p;
+    if (n >= (long) sizeof(link)) return 0;
+    memcpy(link, p, n);
+    link[n] = 0;
+    long r = sys(NR_readlinkat, AT_FDCWD, link, dir, PATH_MAX - 1);
+    if (r < 0) return r;
+    dir[r] = 0;
+    if (dir[0] != '/') return -ENOTDIR; /* a pipe, a socket... */
+    if (!guest_sees(dir)) return 0;
+    long g = host_to_guest(dir, out, PATH_MAX);
+    if (g < 0) return g;
+    r = join(out, out, g, q);
+    if (r < 0) return r;
+    tidy(out);
+    return 1;
+}
+
 long to_host(const char* guest, int follow, char* host, char* resolved) {
     char scratch[PATH_MAX];
     if (resolved == 0) resolved = scratch;
@@ -460,6 +503,10 @@ long to_host(const char* guest, int follow, char* host, char* resolved) {
         if (r >= 0) r = copy(resolved, PATH_MAX, cfg.exe);
         return r < 0 ? r : 0;
     }
+    char from_fd[PATH_MAX];
+    long via_fd = proc_fd_guest(guest, from_fd);
+    if (via_fd < 0) return via_fd;
+    if (via_fd > 0) return to_host(from_fd, follow, host, resolved);
     uint64_t start = stats_start();
     long r = probe(guest, follow, host, resolved);
     if (r != -ELOOP) {
