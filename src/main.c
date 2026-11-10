@@ -220,6 +220,7 @@ static void launch(long argc, char** argv, char** envp) {
     /* Before any path: Android may trap a syscall of ours (openat2), and the
      * handler turns that into ENOSYS instead of a death by SIGSYS. */
     install_handler();
+    l2s_migrate();
     char host[PATH_MAX];
     long r = host_path(AT_FDCWD, workdir, 1, host);
     if (r < 0 || sys(NR_chdir, host, 0, 0, 0) < 0) die("cannot enter ", workdir);
