@@ -373,6 +373,52 @@ static long read_only(long fd, long flags) {
     return r;
 }
 
+/* The /proc file each rewritten copy stands for, by the copy's inode (and
+ * ctime, against a reused inode): readlink() of a descriptor's fd link names
+ * that file, as for the real one. FEX recognizes the /proc files it emulates
+ * by that name. A ring: a copy still open after 64 newer ones shows its own
+ * path again. */
+#define COPIES 64
+static struct copy_of {
+    uint64_t dev, ino;
+    int64_t ctime[2];
+    char path[56];
+} copies[COPIES];
+static unsigned copies_next;
+
+/* Remembers that @copy stands for @in, the real file it was made from. */
+static void remember_copy(long copy, long in) {
+    char link[32] = "/proc/self/fd/", path[sizeof(copies->path)];
+    format_unsigned(link + 14, (unsigned long) in);
+    long n = sys(NR_readlinkat, AT_FDCWD, link, path, sizeof(path) - 1);
+    struct kstat st;
+    if (n <= 0 || n >= (long) sizeof(path) - 1 || sys(NR_fstat, copy, &st, 0, 0) < 0) return;
+    path[n] = 0;
+    struct copy_of* c = &copies[__atomic_fetch_add(&copies_next, 1, __ATOMIC_RELAXED) % COPIES];
+    __atomic_store_n(&c->ino, 0, __ATOMIC_RELEASE);
+    c->dev = st.dev;
+    c->ctime[0] = st.times[4];
+    c->ctime[1] = st.times[5];
+    memcpy(c->path, path, n + 1);
+    __atomic_store_n(&c->ino, st.ino, __ATOMIC_RELEASE);
+}
+
+long proc_copy_target(const char* host, char* out) {
+    struct kstat st;
+    if (sys(NR_newfstatat, AT_FDCWD, host, &st, 0) < 0 || st.nlink != 0) return -1;
+    for (int i = 0; i < COPIES; i++) {
+        struct copy_of* c = &copies[i];
+        if (__atomic_load_n(&c->ino, __ATOMIC_ACQUIRE) != st.ino || c->dev != st.dev || c->ctime[0] != st.times[4] ||
+            c->ctime[1] != st.times[5])
+            continue;
+        char path[sizeof(c->path)];
+        memcpy(path, c->path, sizeof(path));
+        path[sizeof(path) - 1] = 0;
+        if (__atomic_load_n(&c->ino, __ATOMIC_ACQUIRE) == st.ino) return copy(out, PATH_MAX, path);
+    }
+    return -1;
+}
+
 /* /proc/<pid>/maps names the rootfs' files by their host paths: their guest
  * paths instead (VLC finds its plugins from libvlccore's, gdb its libraries). */
 int proc_maps(const char* host) {
@@ -437,6 +483,7 @@ long proc_maps_open(const char* host, long flags) {
     }
     if (used > 0) maps_line(&o, line, used, guest);
     sys(NR_write, o.fd, o.buf, o.used, 0);
+    remember_copy(o.fd, in);
     sys(NR_close, in, 0, 0, 0);
     return read_only(o.fd, flags);
 }
@@ -466,7 +513,6 @@ long proc_status_open(const char* host, long flags) {
     char raw[8192], out[8192 + 64];
     long n = 0, r;
     while (n < (long) sizeof(raw) - 1 && (r = sys(NR_read, in, raw + n, sizeof(raw) - 1 - n, 0)) > 0) n += r;
-    sys(NR_close, in, 0, 0, 0);
     raw[n] = 0;
     struct text t = {out, out + sizeof(out)};
     for (const char* p = raw; *p;) {
@@ -482,9 +528,12 @@ long proc_status_open(const char* host, long flags) {
         while (line < p && t.at < t.end) *t.at++ = *line++;
     }
     long fd = scratch("status", flags);
-    if (fd < 0) return fd;
-    sys(NR_write, fd, out, t.at - out, 0);
-    return read_only(fd, flags);
+    if (fd >= 0) {
+        sys(NR_write, fd, out, t.at - out, 0);
+        remember_copy(fd, in);
+    }
+    sys(NR_close, in, 0, 0, 0);
+    return fd < 0 ? fd : read_only(fd, flags);
 }
 
 /* /proc's files show as empty, read-only and root's. */

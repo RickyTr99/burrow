@@ -367,6 +367,11 @@ static long do_readlink(long dirfd, const char* path, char* buf, long size) {
         }
         if (r < 0) return r;
         target[r] = 0;
+        static const char deleted[] = " (deleted)";
+        if (fd < 0 && r > (long) sizeof(deleted) && same(target + r - sizeof(deleted) + 1, deleted)) {
+            long n = proc_copy_target(host, target);
+            if (n > 0) r = n;
+        }
         /* A faked hard link (to its intermediate, not to the file as /proc's fd links) is a file, no symlink. */
         if (l2s_target(target) && r > 5 && target[r - 5] != '.') return -EINVAL;
         /* Another process's exe is Burrow: KWin finds its clients' desktop files by it. */

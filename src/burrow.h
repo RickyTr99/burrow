@@ -284,6 +284,8 @@ int proc_maps(const char* host); /* 1 for /proc/<pid>/maps */
 long proc_maps_open(const char* host, long flags);
 int proc_status(const char* host); /* 1 for /proc/<pid>/status */
 long proc_status_open(const char* host, long flags);
+/* For @host, an fd link to a rewritten copy (maps, status): the /proc file it stands for in @out, its length; -1 if none. */
+long proc_copy_target(const char* host, char* out);
 long proc_stat(struct kstat* st);
 long proc_statx(struct kstatx* stx);
 
