@@ -113,8 +113,8 @@ fd = os.open(d + "/h", os.O_PATH | os.O_NOFOLLOW)
 ok(stat.S_ISREG(os.fstat(fd).st_mode), "link: a file to O_PATH | O_NOFOLLOW")
 os.close(fd)
 ok(error_of(lambda: os.readlink(d + "/h")) == errno.EINVAL, "link: readlink says no symlink")
-types = {e.name: (e.is_symlink(), e.is_file()) for e in os.scandir(d)}
-ok(types["h"] == (False, True) and types["abs"][0], "link: a file to readdir, symlinks stay symlinks")
+types = {e.name: (e.is_symlink(), e.is_file(follow_symlinks=False)) for e in os.scandir(d)}
+ok(types["h"] == (False, True) and types["abs"] == (True, False), "link: a file to readdir, symlinks stay symlinks")
 fd = os.open(d + "/h", os.O_RDONLY)
 ok(os.path.basename(os.readlink("/proc/self/fd/%d" % fd)) != "", "link: its descriptor's /proc link reads")
 os.close(fd)
