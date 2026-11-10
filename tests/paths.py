@@ -130,6 +130,27 @@ for n in internals:
     os.link(d + "/" + n, d + "/copy" + n)
 ok(stat.S_ISREG(os.lstat(d + "/h").st_mode) and open(d + "/h").read() == "n" and
    os.stat(d + "/h").st_nlink == 2 + len(internals), "links of a chain's intermediate and file join the chain")
+# A copy with hard links made while walking the source, as pressure-vessel's: linking adds or renames nothing there.
+os.mkdir(d + "/src")
+os.mkdir(d + "/dst")
+for i in range(50):
+    with open(d + "/src/%d" % i, "w") as out:
+        out.write(str(i))
+missing = []
+for e in os.scandir(d + "/src"):
+    try:
+        os.stat(e.path, follow_symlinks=False)
+        os.link(e.path, d + "/dst/" + e.name)
+    except OSError:
+        missing.append(e.name)
+ok(not missing and sorted(os.listdir(d + "/src")) == sorted(os.listdir(d + "/dst")) == sorted(map(str, range(50))) and
+   open(d + "/dst/7").read() == "7" and os.stat(d + "/src/7").st_nlink == 2, "links made while walking the source")
+os.link(d + "/dst/7", d + "/dst/again")
+ok(sorted(os.listdir(d + "/src")) == sorted(map(str, range(50))) and os.stat(d + "/src/7").st_nlink == 3,
+   "a third link leaves the other directories alone")
+shutil.rmtree(d + "/src")
+ok(open(d + "/dst/7").read() == "7" and os.stat(d + "/dst/7").st_nlink == 2, "removing a directory of links")
+ok(".l2s" not in os.listdir("/"), "the store is not listed")
 
 # Many threads trapping at once
 errors = []

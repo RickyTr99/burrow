@@ -1128,8 +1128,9 @@ static long emulate(long nr, const uint64_t* x) {
                                     (long) how->flags));
     }
     case NR_getdents64: {
-        long r = sys(NR_getdents64, x[0], x[1], x[2], 0);
-        if (r > 0) l2s_dirents(dirfd, (char*) x[1], r);
+        long r;
+        do r = sys(NR_getdents64, x[0], x[1], x[2], 0);
+        while (r > 0 && (r = l2s_dirents(dirfd, (char*) x[1], r)) == 0); /* 0 would end the listing */
         return r;
     }
     case NR_newfstatat: return do_stat(dirfd, path, (struct kstat*) x[2], (long) x[3]);

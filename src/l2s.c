@@ -8,11 +8,18 @@
  *
  * Link contents are host paths. A link shows as the file itself to stat(),
  * with the count as its number of links.
+ *
+ * New chains keep their intermediate and file in the rootfs's /.l2s, named
+ * after the inode, so a link never adds or renames entries in the directory
+ * linked from: copies with hard links (cp -al, rsync -H, pressure-vessel)
+ * walk it as they link. Where the rootfs is another filesystem, the chain
+ * stays beside the file, as proot made it.
  */
 
 #include "burrow.h"
 
 #define PREFIX ".l2s."
+#define STORE ".l2s" /* in the rootfs's root, hidden from its listing */
 
 static long read_link(const char* host, char* out) {
     long n = sys(NR_readlinkat, AT_FDCWD, host, out, PATH_MAX - 1);
@@ -55,13 +62,29 @@ int l2s_file(const char* host, char* final) {
     return resolve_link(host, intermediate, final);
 }
 
+static int is_root(long dirfd) {
+    struct kstat dir, root;
+    return sys(NR_fstat, dirfd, (long) &dir, 0, 0) == 0 &&
+           sys(NR_newfstatat, AT_FDCWD, (long) cfg.root, (long) &root, 0) == 0 && dir.dev == root.dev &&
+           dir.ino == root.ino;
+}
+
 /* The entries of faked hard links among the @size bytes getdents64() read
  * from @dirfd into @buf, typed as the files they are: programs trust d_type
  * (pressure-vessel reads every DT_LNK one, crashing on its NULL target). As
- * readlink() tells them apart: a link to an intermediate, not to a file. */
-void l2s_dirents(long dirfd, char* buf, long size) {
+ * readlink() tells them apart: a link to an intermediate, not to a file.
+ * Drops the store from the rootfs's root; returns the bytes left. */
+long l2s_dirents(long dirfd, char* buf, long size) {
     char target[PATH_MAX];
-    for (long at = 0; at < size; at += *(uint16_t*) (buf + at + 16)) { /* d_reclen */
+    for (long at = 0, next; at < size; at = next) {
+        long reclen = *(uint16_t*) (buf + at + 16);
+        next = at + reclen;
+        if (same(buf + at + 19, STORE) && is_root(dirfd)) {
+            memmove(buf + at, buf + next, size - next);
+            size -= reclen;
+            next = at;
+            continue;
+        }
         char* type = buf + at + 18;
         if (*type != 10 /* DT_LNK */) continue;
         long n = sys(NR_readlinkat, dirfd, (long) (buf + at + 19), (long) target, PATH_MAX - 1);
@@ -69,6 +92,7 @@ void l2s_dirents(long dirfd, char* buf, long size) {
         target[n] = 0;
         if (l2s_target(target) && target[n - 5] != '.') *type = 8 /* DT_REG */;
     }
+    return size;
 }
 
 /* The chain whose intermediate or file @host is, which readdir shows: a copy
@@ -123,6 +147,27 @@ long l2s_unlinked(const char* host) {
     return sys(NR_unlinkat, AT_FDCWD, final, 0, 0);
 }
 
+/* Moves @old to the file of a new chain named after @name in the directory
+ * of the first @dir_length bytes of @dir. */
+static long new_chain(const char* old, const char* dir, long dir_length, const char* name, char* intermediate,
+                      char* final) {
+    long n = dir_length + (long) sizeof(PREFIX) - 1 + length_of(name);
+    if (n + 10 >= PATH_MAX) return -ENAMETOOLONG;
+    memcpy(intermediate, dir, dir_length);
+    memcpy(intermediate + dir_length, PREFIX, sizeof(PREFIX) - 1);
+    memcpy(intermediate + dir_length + sizeof(PREFIX) - 1, name, length_of(name));
+    /* The first free suffix; a dangling intermediate counts as free. */
+    for (long suffix = 1;; suffix++) {
+        if (suffix == 1000) return -EPERM;
+        memcpy(intermediate + n, "0000", 5);
+        with_count(intermediate, suffix, intermediate);
+        if (sys(NR_faccessat, AT_FDCWD, (long) intermediate, 0, 0) == -ENOENT) break;
+    }
+    memcpy(final, intermediate, n + 4);
+    memcpy(final + n + 4, ".0002", 6);
+    return sys(NR_renameat, AT_FDCWD, (long) old, AT_FDCWD, (long) final);
+}
+
 long l2s_link(const char* old, const char* new) {
     char intermediate[PATH_MAX], final[PATH_MAX], next[PATH_MAX];
     struct kstat st;
@@ -136,23 +181,19 @@ long l2s_link(const char* old, const char* new) {
         sys(NR_unlinkat, AT_FDCWD, intermediate, 0, 0);
         if ((r = sys(NR_symlinkat, next, AT_FDCWD, intermediate, 0)) < 0) return r;
     } else {
-        const char* name = base_name(old);
-        long dir = name - old;
-        long n = dir + (long) sizeof(PREFIX) - 1 + length_of(name);
-        if (n + 10 >= PATH_MAX) return -ENAMETOOLONG;
-        memcpy(intermediate, old, dir);
-        memcpy(intermediate + dir, PREFIX, sizeof(PREFIX) - 1);
-        memcpy(intermediate + dir + sizeof(PREFIX) - 1, name, length_of(name));
-        /* The first free suffix; a dangling intermediate counts as free. */
-        for (long suffix = 1;; suffix++) {
-            if (suffix == 1000) return -EPERM;
-            memcpy(intermediate + n, "0000", 5);
-            with_count(intermediate, suffix, intermediate);
-            if (sys(NR_faccessat, AT_FDCWD, intermediate, 0, 0) == -ENOENT) break;
+        char store[PATH_MAX], ino[24];
+        long n = cfg.root_length + (long) sizeof("/" STORE "/") - 1;
+        format_unsigned(ino, st.ino);
+        if (n < PATH_MAX) {
+            memcpy(store, cfg.root, cfg.root_length);
+            memcpy(store + cfg.root_length, "/" STORE "/", n - cfg.root_length + 1);
+            r = new_chain(old, store, n, ino, intermediate, final);
+            if (r == -ENOENT && sys(NR_mkdirat, AT_FDCWD, store, 0700, 0) == 0)
+                r = new_chain(old, store, n, ino, intermediate, final);
         }
-        memcpy(final, intermediate, n + 4);
-        memcpy(final + n + 4, ".0002", 6);
-        if ((r = sys(NR_renameat, AT_FDCWD, old, AT_FDCWD, final)) < 0) return r;
+        if (n >= PATH_MAX || r == -EXDEV || r == -ENOENT || r == -EACCES)
+            r = new_chain(old, old, base_name(old) - old, base_name(old), intermediate, final);
+        if (r < 0) return r;
         if ((r = sys(NR_symlinkat, final, AT_FDCWD, intermediate, 0)) < 0 ||
             (r = sys(NR_symlinkat, intermediate, AT_FDCWD, old, 0)) < 0) {
             sys(NR_unlinkat, AT_FDCWD, intermediate, 0, 0);
