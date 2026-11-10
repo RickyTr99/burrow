@@ -291,6 +291,8 @@ static void fill(int which, struct text* t) {
     case 13:
         put(t, "nodev\tsysfs\nnodev\ttmpfs\nnodev\tproc\nnodev\tdevpts\nnodev\tfuse\n\text4\n\tf2fs\n\tvfat\n");
         break;
+    case 14: /* sys/kernel/overflowuid: bwrap maps it in its user namespaces */
+    case 15: put(t, "65534\n"); break; /* sys/kernel/overflowgid */
     }
 }
 
@@ -298,7 +300,7 @@ static const char* const files[] = {
     "/proc/version", "/proc/sys/kernel/osrelease", "/proc/sys/kernel/hostname", "/proc/uptime", "/proc/loadavg",
     "/proc/stat", "/proc/sys/kernel/cap_last_cap", "/proc/sys/kernel/pid_max", "/proc/sys/fs/inotify/max_user_watches",
     "/proc/sys/fs/file-max", "/proc/sys/vm/overcommit_memory", "/proc/sys/kernel/shmmax", "/proc/swaps",
-    "/proc/filesystems",
+    "/proc/filesystems", "/proc/sys/kernel/overflowuid", "/proc/sys/kernel/overflowgid",
 };
 
 int proc_file(const char* host) {

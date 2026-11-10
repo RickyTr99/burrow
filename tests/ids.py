@@ -34,6 +34,8 @@ ok("Uid:\t0\t0\t0\t0\n" in open("/proc/%d/status" % os.getpid()).read(), "/proc/
 fd = os.open("/proc/%d/status" % os.getpid(), os.O_RDONLY)
 ok(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY, "/proc/<pid>/status opens read-only (Electron)")
 os.close(fd)
+ok(open("/proc/sys/kernel/overflowuid").read() == open("/proc/sys/kernel/overflowgid").read() == "65534\n",
+   "overflowuid and overflowgid (bwrap)")
 ok(error_of(lambda: os.chown(d + "/root-file", 1000, 1000)) == 0, "chown")
 ok(ctypes.CDLL(None, use_errno=True).prctl(8, 1, 0, 0, 0) == 0, "prctl(PR_SET_KEEPCAPS)")
 
