@@ -293,7 +293,6 @@ long l2s_link(const char* old, const char* new);
 long l2s_unlinked(const char* host);
 int l2s_target(const char* t); /* whether the symlink content @t names a faked hard link */
 int l2s_file(const char* host, char* final); /* the file of the faked hard link @host, if it is one */
-void l2s_migrate(void); /* moves proot's chains into the store, once per rootfs */
 long l2s_dirents(long dirfd, char* buf, long size); /* getdents64() entries of faked hard links as files */
 
 /* elf.c */

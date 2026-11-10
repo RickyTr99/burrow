@@ -147,19 +147,10 @@ long l2s_unlinked(const char* host) {
     return sys(NR_unlinkat, AT_FDCWD, final, 0, 0);
 }
 
-/* "<rootfs>/.l2s/" into @out: its length, or -1. */
-static long store_path(char* out) {
-    long n = cfg.root_length + (long) sizeof("/" STORE "/") - 1;
-    if (n + 40 >= PATH_MAX) return -1;
-    memcpy(out, cfg.root, cfg.root_length);
-    memcpy(out + cfg.root_length, "/" STORE "/", n - cfg.root_length + 1);
-    return n;
-}
-
-/* Moves @old to the file of a new chain with @count links, named after @name
- * in the directory of the first @dir_length bytes of @dir. */
-static long new_chain(const char* old, const char* dir, long dir_length, const char* name, long count,
-                      char* intermediate, char* final) {
+/* Moves @old to the file of a new chain named after @name in the directory
+ * of the first @dir_length bytes of @dir. */
+static long new_chain(const char* old, const char* dir, long dir_length, const char* name, char* intermediate,
+                      char* final) {
     long n = dir_length + (long) sizeof(PREFIX) - 1 + length_of(name);
     if (n + 10 >= PATH_MAX) return -ENAMETOOLONG;
     memcpy(intermediate, dir, dir_length);
@@ -173,8 +164,7 @@ static long new_chain(const char* old, const char* dir, long dir_length, const c
         if (sys(NR_faccessat, AT_FDCWD, (long) intermediate, 0, 0) == -ENOENT) break;
     }
     memcpy(final, intermediate, n + 4);
-    memcpy(final + n + 4, ".0000", 6);
-    with_count(final, count, final);
+    memcpy(final + n + 4, ".0002", 6);
     return sys(NR_renameat, AT_FDCWD, (long) old, AT_FDCWD, (long) final);
 }
 
@@ -192,15 +182,17 @@ long l2s_link(const char* old, const char* new) {
         if ((r = sys(NR_symlinkat, next, AT_FDCWD, intermediate, 0)) < 0) return r;
     } else {
         char store[PATH_MAX], ino[24];
-        long n = store_path(store);
+        long n = cfg.root_length + (long) sizeof("/" STORE "/") - 1;
         format_unsigned(ino, st.ino);
-        if (n > 0) {
-            r = new_chain(old, store, n, ino, 2, intermediate, final);
+        if (n < PATH_MAX) {
+            memcpy(store, cfg.root, cfg.root_length);
+            memcpy(store + cfg.root_length, "/" STORE "/", n - cfg.root_length + 1);
+            r = new_chain(old, store, n, ino, intermediate, final);
             if (r == -ENOENT && sys(NR_mkdirat, AT_FDCWD, store, 0700, 0) == 0)
-                r = new_chain(old, store, n, ino, 2, intermediate, final);
+                r = new_chain(old, store, n, ino, intermediate, final);
         }
-        if (n < 0 || r == -EXDEV || r == -ENOENT || r == -EACCES)
-            r = new_chain(old, old, base_name(old) - old, base_name(old), 2, intermediate, final);
+        if (n >= PATH_MAX || r == -EXDEV || r == -ENOENT || r == -EACCES)
+            r = new_chain(old, old, base_name(old) - old, base_name(old), intermediate, final);
         if (r < 0) return r;
         if ((r = sys(NR_symlinkat, final, AT_FDCWD, intermediate, 0)) < 0 ||
             (r = sys(NR_symlinkat, intermediate, AT_FDCWD, old, 0)) < 0) {
@@ -212,118 +204,4 @@ long l2s_link(const char* old, const char* new) {
     r = sys(NR_symlinkat, intermediate, AT_FDCWD, new, 0);
     if (r < 0) l2s_unlinked(old);
     return r;
-}
-
-/* -- Chains beside their files, proot's, moved into the store ---------------- */
-
-static char store[PATH_MAX];
-static long store_length; /* with its final slash */
-
-static int in_store(const char* t) {
-    return starts_with(t, store) && t[store_length] != 0;
-}
-
-/* Replaces the entry @name of @dirfd with a symlink to @target, atomically:
- * a walk of the directory meanwhile still finds it. */
-static long relink(long dirfd, const char* name, const char* target) {
-    char tmp[PATH_MAX];
-    memcpy(tmp, store, store_length);
-    memcpy(tmp + store_length, ".tmp", 5);
-    sys(NR_unlinkat, AT_FDCWD, tmp, 0, 0);
-    long r = sys(NR_symlinkat, target, AT_FDCWD, tmp, 0);
-    return r < 0 ? r : sys(NR_renameat, AT_FDCWD, tmp, dirfd, name);
-}
-
-/* Moves the chain of @intermediate, whose file is @final, into the
- * store; its intermediate, into @to. The old intermediate points to the moved
- * file, so its links keep working until they are pointed to @to. */
-static long move_chain(const char* intermediate, const char* final, char* to) {
-    char moved[PATH_MAX], ino[24];
-    struct kstat st;
-    long r = sys(NR_newfstatat, AT_FDCWD, final, &st, AT_SYMLINK_NOFOLLOW);
-    if (r < 0) return r;
-    format_unsigned(ino, st.ino);
-    if ((r = new_chain(final, store, store_length, ino, count_of(final), to, moved)) < 0) return r;
-    if ((r = sys(NR_symlinkat, moved, AT_FDCWD, to, 0)) < 0 || (r = relink(AT_FDCWD, intermediate, moved)) < 0) {
-        sys(NR_unlinkat, AT_FDCWD, to, 0, 0);
-        sys(NR_renameat, AT_FDCWD, moved, AT_FDCWD, final);
-        return r;
-    }
-    return 0;
-}
-
-/* @p with the rootfs's alias (/data/user/0 for /data/data) as the rootfs:
- * they are different mounts, between which rename() fails. */
-static void unalias(char* p) {
-    long a = cfg.root_alias_length;
-    if (a == 0 || !starts_with(p, cfg.root_alias) || (p[a] != '/' && p[a] != 0)) return;
-    long rest = length_of(p + a);
-    if (cfg.root_length + rest >= PATH_MAX) return;
-    memmove(p + cfg.root_length, p + a, rest + 1);
-    memcpy(p, cfg.root, cfg.root_length);
-}
-
-/* The symlink @name in @dirfd: in the first pass a link of a chain beside its
- * file is pointed to the chain moved into the store; in the second the old
- * intermediates, which nothing points to any more, go. */
-static void visit(long dirfd, const char* name, int pass) {
-    char target[PATH_MAX], final[PATH_MAX], to[PATH_MAX];
-    long n = sys(NR_readlinkat, dirfd, name, target, PATH_MAX - 1);
-    if (n <= 5) return;
-    target[n] = 0;
-    if (!l2s_target(target)) return;
-    if (pass == 2) {
-        if (target[n - 5] == '.' && in_store(target) && starts_with(name, PREFIX)) sys(NR_unlinkat, dirfd, name, 0, 0);
-        return;
-    }
-    if (target[n - 5] == '.' || in_store(target)) return; /* an intermediate, or a link into the store */
-    long m = read_link(target, final);
-    if (m <= 5 || !l2s_target(final) || final[m - 5] != '.') return;
-    unalias(target);
-    unalias(final);
-    m = length_of(final);
-    if (in_store(final)) { /* moved for another link */
-        memcpy(to, final, m - 5);
-        to[m - 5] = 0;
-    } else if (move_chain(target, final, to) < 0) {
-        return;
-    }
-    relink(dirfd, name, to);
-}
-
-static void walk(long dirfd, int pass, int top) {
-    char buf[4096];
-    long n;
-    while ((n = sys(NR_getdents64, dirfd, buf, sizeof(buf), 0)) > 0) {
-        for (long at = 0; at < n; at += *(uint16_t*) (buf + at + 16)) {
-            const char* name = buf + at + 19;
-            char type = buf[at + 18];
-            if (same(name, ".") || same(name, "..") || (top && same(name, STORE))) continue;
-            if (type == 10 /* DT_LNK */) {
-                visit(dirfd, name, pass);
-            } else if (type == 4 /* DT_DIR */) {
-                long sub = sys(NR_openat, dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
-                if (sub < 0) continue;
-                walk(sub, pass, 0);
-                sys(NR_close, sub, 0, 0, 0);
-            }
-        }
-    }
-}
-
-void l2s_migrate(void) {
-    char done[PATH_MAX];
-    if ((store_length = store_path(store)) < 0) return;
-    memcpy(done, store, store_length);
-    memcpy(done + store_length, ".moved", 7);
-    if (sys(NR_faccessat, AT_FDCWD, done, 0, 0) == 0) return;
-    sys(NR_mkdirat, AT_FDCWD, store, 0700, 0);
-    for (int pass = 1; pass <= 2; pass++) {
-        long fd = sys(NR_openat, AT_FDCWD, cfg.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
-        if (fd < 0) return;
-        walk(fd, pass, 1);
-        sys(NR_close, fd, 0, 0, 0);
-    }
-    long fd = sys(NR_openat, AT_FDCWD, done, O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
-    if (fd >= 0) sys(NR_close, fd, 0, 0, 0);
 }
