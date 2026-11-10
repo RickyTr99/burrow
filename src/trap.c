@@ -6,13 +6,14 @@
  * signal frame: it makes the real syscalls through the gadget and writes the
  * result into x0. The kernel resets a blocked or ignored SIGSYS to the
  * default action (death) before delivering a trap, so the guest never gets to
- * block it: masks are filtered and the guest's own SIGSYS disposition is only
+ * block it: masks are filtered (also the ones signal frames bring back at
+ * rt_sigreturn) and the guest's own SIGSYS disposition is only
  * recorded (its handler gets the traps of its own filters).
  */
 
 #include "burrow.h"
 
-extern char burrow_gadget[];
+extern char burrow_gadget[], burrow_sigreturn[];
 
 /* -- The filter --------------------------------------------------------------------- */
 
@@ -21,6 +22,7 @@ static const uint16_t trapped[] = {
     NR_lremovexattr, NR_getcwd, NR_inotify_add_watch, NR_mknodat, NR_mkdirat, NR_unlinkat, NR_symlinkat,
     NR_linkat, NR_renameat, NR_statfs, NR_fstatfs, NR_truncate, NR_faccessat, NR_chdir, NR_fchmodat, NR_fchownat, NR_fchown,
     NR_openat, NR_readlinkat, NR_getdents64, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
+    NR_rt_sigreturn,
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
@@ -1382,6 +1384,15 @@ static void on_trap(struct ksiginfo* info, struct kucontext* uc) {
                                          (long) x[3]);
         return;
     }
+    if (info->syscall == NR_rt_sigreturn) {
+        /* The mask in the frame comes back with no rt_sigprocmask(): a handler
+         * may have put SIGSYS there (FEX's, with the x86 guest's mask). The
+         * frame (siginfo, then the ucontext) is at sp; the real call goes
+         * from the gadget once this handler returns. */
+        ((struct kucontext*) (uc->mcontext.sp + 128))->sigmask &= ~SIGSYS_BIT;
+        uc->mcontext.pc = (uintptr_t) burrow_gadget;
+        return;
+    }
     x[0] = (uint64_t) emulate(info->syscall, x);
 }
 
@@ -1476,7 +1487,7 @@ void install_handler(void) {
      * one, not on the thread's stack, which may be a goroutine's few KB. The
      * handler itself moves to a stack of ours, all signals blocked meanwhile
      * but SIGSYS (a blocked trap would kill). */
-    struct ksigaction act = {(uintptr_t) on_sigsys_entry, SA_SIGINFO | SA_NODEFER | SA_ONSTACK, 0,
-                             ~(1ull << (SIGSYS - 1))};
+    struct ksigaction act = {(uintptr_t) on_sigsys_entry, SA_SIGINFO | SA_NODEFER | SA_ONSTACK | SA_RESTORER,
+                             (uintptr_t) burrow_sigreturn, ~(1ull << (SIGSYS - 1))};
     if (sys(NR_rt_sigaction, SIGSYS, &act, 0, 8) < 0) die("cannot install the SIGSYS handler", 0);
 }

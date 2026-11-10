@@ -21,6 +21,13 @@ burrow_gadget:
     svc #0
     ret
 
+// The SIGSYS handler's restorer: its rt_sigreturn goes through the gadget, the guests' are trapped.
+    .globl burrow_sigreturn
+    .type burrow_sigreturn, %function
+burrow_sigreturn:
+    mov x8, #139
+    b burrow_gadget
+
 // burrow_call_on_stack(a, b, c, fn, top): fn(a, b, c) on the stack ending at top.
     .globl burrow_call_on_stack
     .type burrow_call_on_stack, %function
