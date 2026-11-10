@@ -118,11 +118,15 @@ ok(types["h"] == (False, True) and types["abs"] == (True, False), "link: a file 
 fd = os.open(d + "/h", os.O_RDONLY)
 ok(os.path.basename(os.readlink("/proc/self/fd/%d" % fd)) != "", "link: its descriptor's /proc link reads")
 os.close(fd)
-ok(sorted(os.listdir(d)) == sorted(["abs", "chain", "etc", "g", "h", "loop1", "loop2", "rel", "sub", "sublink"]), "listing")
+ok(sorted(n for n in os.listdir(d) if not n.startswith(".l2s.")) == sorted(["abs", "chain", "etc", "g", "h", "loop1", "loop2", "rel", "sub", "sublink"]), "listing")
 os.unlink(d + "/g")
 ok(open(d + "/h").read() == "n" and os.stat(d + "/h").st_nlink == 1, "unlink one link: the other stays")
 os.link(d + "/h", d + "/i")
 ok(open(d + "/i").read() == "n" and os.stat(d + "/h").st_nlink == 2, "a link of the remaining link")
+for n in sorted((n for n in os.listdir(d) if n.startswith(".l2s.")), reverse=True):  # the file first: it gets renamed
+    os.link(d + "/" + n, d + "/copy" + n)  # as a copy of the directory with hard links does
+ok(stat.S_ISREG(os.lstat(d + "/h").st_mode) and open(d + "/h").read() == "n" and os.stat(d + "/h").st_nlink == 4,
+   "links of a chain's intermediate and file join the chain")
 
 # Many threads trapping at once
 errors = []

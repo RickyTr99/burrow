@@ -293,7 +293,7 @@ long l2s_link(const char* old, const char* new);
 long l2s_unlinked(const char* host);
 int l2s_target(const char* t); /* whether the symlink content @t names a faked hard link */
 int l2s_file(const char* host, char* final); /* the file of the faked hard link @host, if it is one */
-long l2s_dirents(long dirfd, char* buf, long size); /* getdents64() entries as Linux would give them */
+void l2s_dirents(long dirfd, char* buf, long size); /* getdents64() entries of faked hard links as files */
 
 /* elf.c */
 __attribute__((noreturn)) void load_and_run(long* sp);
