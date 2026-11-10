@@ -123,10 +123,13 @@ os.unlink(d + "/g")
 ok(open(d + "/h").read() == "n" and os.stat(d + "/h").st_nlink == 1, "unlink one link: the other stays")
 os.link(d + "/h", d + "/i")
 ok(open(d + "/i").read() == "n" and os.stat(d + "/h").st_nlink == 2, "a link of the remaining link")
-for n in sorted((n for n in os.listdir(d) if n.startswith(".l2s.")), reverse=True):  # the file first: it gets renamed
-    os.link(d + "/" + n, d + "/copy" + n)  # as a copy of the directory with hard links does
-ok(stat.S_ISREG(os.lstat(d + "/h").st_mode) and open(d + "/h").read() == "n" and os.stat(d + "/h").st_nlink == 4,
-   "links of a chain's intermediate and file join the chain")
+# Linked as a copy of the directory with hard links does (none where the kernel makes real ones); the file first:
+# it gets renamed.
+internals = sorted((n for n in os.listdir(d) if n.startswith(".l2s.")), reverse=True)
+for n in internals:
+    os.link(d + "/" + n, d + "/copy" + n)
+ok(stat.S_ISREG(os.lstat(d + "/h").st_mode) and open(d + "/h").read() == "n" and
+   os.stat(d + "/h").st_nlink == 2 + len(internals), "links of a chain's intermediate and file join the chain")
 
 # Many threads trapping at once
 errors = []
