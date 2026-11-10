@@ -55,20 +55,31 @@ int l2s_file(const char* host, char* final) {
     return resolve_link(host, intermediate, final);
 }
 
-/* The entries of faked hard links among the @size bytes getdents64() read
- * from @dirfd into @buf, typed as the files they are: programs trust d_type
- * (pressure-vessel reads every DT_LNK one, crashing on its NULL target). As
- * readlink() tells them apart: a link to an intermediate, not to a file. */
-void l2s_dirents(long dirfd, char* buf, long size) {
+/* The @size bytes getdents64() read from @dirfd into @buf as Linux would
+ * list them; the bytes left. The intermediates and files are hidden: a copy
+ * of the directory with hard links (pressure-vessel's) would link a file into
+ * a link of its own and break the chain. Faked hard links are typed as the
+ * files they are: programs trust d_type (pressure-vessel reads every DT_LNK
+ * one, crashing on a NULL target). As readlink() tells them apart: a link to
+ * an intermediate, not to a file. */
+long l2s_dirents(long dirfd, char* buf, long size) {
     char target[PATH_MAX];
-    for (long at = 0; at < size; at += *(uint16_t*) (buf + at + 16)) { /* d_reclen */
-        char* type = buf + at + 18;
-        if (*type != 10 /* DT_LNK */) continue;
-        long n = sys(NR_readlinkat, dirfd, (long) (buf + at + 19), (long) target, PATH_MAX - 1);
-        if (n <= 5) continue;
-        target[n] = 0;
-        if (l2s_target(target) && target[n - 5] != '.') *type = 8 /* DT_REG */;
+    long kept = 0;
+    for (long at = 0, reclen; at < size; at += reclen) {
+        char* entry = buf + at;
+        reclen = *(uint16_t*) (entry + 16);
+        if (starts_with(entry + 19, PREFIX)) continue;
+        if (entry[18] == 10 /* DT_LNK */) {
+            long n = sys(NR_readlinkat, dirfd, (long) (entry + 19), (long) target, PATH_MAX - 1);
+            if (n > 5) {
+                target[n] = 0;
+                if (l2s_target(target) && target[n - 5] != '.') entry[18] = 8 /* DT_REG */;
+            }
+        }
+        if (kept != at) memmove(buf + kept, entry, reclen);
+        kept += reclen;
     }
+    return kept;
 }
 
 int l2s_stat(const char* host, struct kstat* st) {
