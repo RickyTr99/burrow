@@ -20,7 +20,7 @@ static const uint16_t trapped[] = {
     NR_setxattr, NR_lsetxattr, NR_getxattr, NR_lgetxattr, NR_listxattr, NR_llistxattr, NR_removexattr,
     NR_lremovexattr, NR_getcwd, NR_inotify_add_watch, NR_mknodat, NR_mkdirat, NR_unlinkat, NR_symlinkat,
     NR_linkat, NR_renameat, NR_statfs, NR_fstatfs, NR_truncate, NR_faccessat, NR_chdir, NR_fchmodat, NR_fchownat, NR_fchown,
-    NR_openat, NR_readlinkat, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
+    NR_openat, NR_readlinkat, NR_getdents64, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
@@ -1126,6 +1126,11 @@ static long emulate(long nr, const uint64_t* x) {
         int follow = !(how->flags & O_NOFOLLOW) && (how->flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
         ON_HOST(follow, l2s_path_fd(open_as_root(NR_openat2, host, (long) how->flags, (long) how, (long) x[3]),
                                     (long) how->flags));
+    }
+    case NR_getdents64: {
+        long r = sys(NR_getdents64, x[0], x[1], x[2], 0);
+        if (r > 0) l2s_dirents(dirfd, (char*) x[1], r);
+        return r;
     }
     case NR_newfstatat: return do_stat(dirfd, path, (struct kstat*) x[2], (long) x[3]);
     case NR_fstat: {

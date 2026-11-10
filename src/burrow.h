@@ -46,7 +46,7 @@ enum {
     NR_removexattr = 14, NR_lremovexattr = 15, NR_getcwd = 17, NR_fcntl = 25, NR_ioctl = 29, NR_inotify_add_watch = 27,
     NR_mknodat = 33, NR_mkdirat = 34, NR_unlinkat = 35, NR_symlinkat = 36, NR_linkat = 37, NR_renameat = 38,
     NR_statfs = 43, NR_fstatfs = 44, NR_truncate = 45, NR_faccessat = 48, NR_chdir = 49, NR_chroot = 51, NR_fchmodat = 53, NR_fchownat = 54,
-    NR_fchown = 55, NR_openat = 56, NR_close = 57, NR_lseek = 62, NR_read = 63, NR_write = 64, NR_pread64 = 67,
+    NR_fchown = 55, NR_openat = 56, NR_close = 57, NR_getdents64 = 61, NR_lseek = 62, NR_read = 63, NR_write = 64, NR_pread64 = 67,
     NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80, NR_utimensat = 88, NR_exit_group = 94,
     NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
@@ -293,6 +293,7 @@ long l2s_link(const char* old, const char* new);
 long l2s_unlinked(const char* host);
 int l2s_target(const char* t); /* whether the symlink content @t names a faked hard link */
 int l2s_file(const char* host, char* final); /* the file of the faked hard link @host, if it is one */
+void l2s_dirents(long dirfd, char* buf, long size); /* getdents64() entries of faked hard links as files */
 
 /* elf.c */
 __attribute__((noreturn)) void load_and_run(long* sp);

@@ -92,7 +92,6 @@ static int cpu_count(void) {
  * counters only grow; the rest of the time is idle. Threads that end between
  * two reads lose their last slice. The state is the reading process's own. */
 
-#define NR_getdents64 61
 #define MAX_CPUS 64
 #define THREADS 4096 /* slots, a power of two */
 

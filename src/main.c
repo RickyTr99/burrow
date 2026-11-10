@@ -64,7 +64,6 @@ static void add_bind(const char* spec) {
 
 /* -- Supervisor ---------------------------------------------------------------- */
 
-#define NR_getdents64 61
 #define NR_kill 129
 #define NR_clone 220
 #define NR_wait4 260

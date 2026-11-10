@@ -17,7 +17,6 @@
 
 #include "burrow.h"
 
-#define NR_getdents64 61
 #define NR_getrandom 278
 #define IPC_CREAT 01000
 #define IPC_EXCL 02000
