@@ -1112,7 +1112,8 @@ static long emulate(long nr, const uint64_t* x) {
         /* RESOLVE_BENEATH and the like would apply to the host path (EXDEV for
          * an absolute one): say openat2 is missing, and callers (libglnx's,
          * Flatpak's) confine the path themselves. */
-        if (how != 0 && how->resolve != 0) return -ENOSYS;
+        if (how == 0) return -EFAULT;
+        if (how->resolve != 0) return -ENOSYS;
         int follow = !(how->flags & O_NOFOLLOW) && (how->flags & (O_CREAT | O_EXCL)) != (O_CREAT | O_EXCL);
         ON_HOST(follow, l2s_path_fd(open_as_root(NR_openat2, host, (long) how->flags, (long) how, (long) x[3]),
                                     (long) how->flags));
