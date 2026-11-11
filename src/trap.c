@@ -51,10 +51,18 @@ struct sock_filter {
 #define DRM_IOCTL_VERSION 0xc0406400u
 #define EXEC_STACK 0x01000007u /* PROT_READ | PROT_WRITE | PROT_EXEC | PROT_GROWSDOWN */
 #define N_TRAPPED (sizeof(trapped) / sizeof(*trapped))
+#define TCGETS 0x5401u
+#define TCSETS 0x5402u
+#define TCSETSW 0x5403u
+#define TCSETSF 0x5404u
+#define TCGETS2 0x802c542au
+#define TCSETS2 0x402c542bu
+#define TCSETSW2 0x402c542cu
+#define TCSETSF2 0x402c542du
 
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 36];
+    struct sock_filter f[10 + N_TRAPPED + 40];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -101,10 +109,15 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){JEQ, 0, 1, PR_SET_KEEPCAPS};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 0};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
-    /* ioctl(DRM_IOCTL_VERSION) only: the render node is KGSL, see do_drm_version(). */
-    f[i++] = (struct sock_filter){JEQ, 0, 4, NR_ioctl};
+    /* ioctl(DRM_IOCTL_VERSION): the render node is KGSL, see do_drm_version().
+     * The termios2 ioctls (glibc 2.42+): Android's SELinux refuses them, see do_termios2(). */
+    f[i++] = (struct sock_filter){JEQ, 0, 8, NR_ioctl};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
-    f[i++] = (struct sock_filter){JEQ, 0, 1, DRM_IOCTL_VERSION};
+    f[i++] = (struct sock_filter){JEQ, 4, 0, DRM_IOCTL_VERSION};
+    f[i++] = (struct sock_filter){JEQ, 3, 0, TCGETS2};
+    f[i++] = (struct sock_filter){JEQ, 2, 0, TCSETS2};
+    f[i++] = (struct sock_filter){JEQ, 1, 0, TCSETSW2};
+    f[i++] = (struct sock_filter){JEQ, 0, 1, TCSETSF2};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     /* mprotect() of an executable stack only, see do_mprotect(). */
@@ -683,6 +696,30 @@ static long do_peercred(const uint64_t* x) {
  * ioctl, and Chromium's GPU process dies without a version. KGSL answers as
  * "kgsl": Mesa's loader is told its driver (zink), Turnip's msm probe skips
  * any name but "msm". */
+/* TCGETS2 and friends, done with the old ioctls: Android's ioctl allow-list
+ * for app terminals lacks them, so isatty() of a recent glibc gets EACCES. A
+ * struct termios2 is a struct termios (36 bytes) and two speeds. */
+static long do_termios2(const uint64_t* x) {
+    static const uint32_t low[16] = {0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800, 9600, 19200, 38400};
+    static const uint32_t high[16] = {0, 57600, 115200, 230400, 460800, 500000, 576000, 921600, 1000000, 1152000,
+                                      1500000, 2000000, 2500000, 3000000, 3500000, 4000000};
+    char t[44];
+    uint32_t cmd = (uint32_t) x[1];
+    if (cmd == TCGETS2) {
+        long r = sys(NR_ioctl, x[0], TCGETS, t, 0);
+        if (r < 0) return r;
+        uint32_t cflag;
+        memcpy(&cflag, t + 8, 4);
+        uint32_t speed = ((cflag & 010000) ? high : low)[cflag & 017];
+        memcpy(t + 36, &speed, 4);
+        memcpy(t + 40, &speed, 4);
+        memcpy((void*) x[2], t, 44);
+        return 0;
+    }
+    memcpy(t, (const void*) x[2], 44);
+    return sys(NR_ioctl, x[0], cmd == TCSETS2 ? TCSETS : cmd == TCSETSW2 ? TCSETSW : TCSETSF, t, 0);
+}
+
 static long do_drm_version(const uint64_t* x) {
     long r = sys(NR_ioctl, x[0], x[1], x[2], 0);
     if (r != -25 /* ENOTTY */ && r != -EINVAL) return r;
@@ -1266,7 +1303,7 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_getsockname:
     case NR_getpeername: return do_sockname(nr, (long) x[0], (char*) x[1], (uint32_t*) x[2]);
     case NR_getsockopt: return do_peercred(x);
-    case NR_ioctl: return do_drm_version(x);
+    case NR_ioctl: return (uint32_t) x[1] == DRM_IOCTL_VERSION ? do_drm_version(x) : do_termios2(x);
     case NR_shmget:
     case NR_shmctl:
     case NR_shmat:
