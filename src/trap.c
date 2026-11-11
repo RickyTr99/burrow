@@ -51,42 +51,44 @@ struct sock_filter {
 #define DRM_IOCTL_VERSION 0xc0406400u
 #define EXEC_STACK 0x01000007u /* PROT_READ | PROT_WRITE | PROT_EXEC | PROT_GROWSDOWN */
 #define N_TRAPPED (sizeof(trapped) / sizeof(*trapped))
+#define TO_TRAP 0xff /* a jump to the trap, its distance set once the trap is placed */
 
+/* The syscall number first, the caller only for the syscalls that may trap:
+ * what a filter answers from the number alone the kernel remembers (since
+ * 5.11), and it runs no filter at all for those syscalls, Android's neither. */
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[10 + N_TRAPPED + 36];
+    struct sock_filter f[N_TRAPPED + 48];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
-    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 12}; /* instruction pointer, high half */
-    f[i++] = (struct sock_filter){JEQ, 0, 4, (uint32_t) (gadget >> 32)};
-    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 8};
-    f[i++] = (struct sock_filter){JEQ, 1, 0, (uint32_t) gadget + 4};
-    f[i++] = (struct sock_filter){JEQ, 0, 1, (uint32_t) gadget};
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 0}; /* nr */
-    for (unsigned t = 0; t < N_TRAPPED; t++)
-        f[i++] = (struct sock_filter){JEQ, (uint8_t) (N_TRAPPED - t + 1), 0, trapped[t]};
-    /* getsockopt(), only for SO_PEERCRED: the ids it reports are real. */
-    f[i++] = (struct sock_filter){JEQ, 2, 6, NR_getsockopt};
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW}; /* unused: keeps the jumps above to RET_TRAP */
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
-    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
-    f[i++] = (struct sock_filter){JEQ, 0, 1, 17 /* SO_PEERCRED */};
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    /* ioctl(DRM_IOCTL_VERSION) only: the render node is KGSL, see do_drm_version(). */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_ioctl};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
+    f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, DRM_IOCTL_VERSION};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     /* lseek(fd, 0, SEEK_SET) only: made-up /proc files read again (proc_rewind()). */
-    f[i++] = (struct sock_filter){JEQ, 0, 6, NR_lseek};
+    f[i++] = (struct sock_filter){JEQ, 0, 5, NR_lseek};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
-    f[i++] = (struct sock_filter){JEQ, 0, 3, 0};
+    f[i++] = (struct sock_filter){JEQ, 0, 2, 0};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
-    f[i++] = (struct sock_filter){JEQ, 0, 1, 0 /* SEEK_SET */};
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
+    f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, 0 /* SEEK_SET */};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* mprotect() of an executable stack only, see do_mprotect(). */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_mprotect};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
+    f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, EXEC_STACK};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* getsockopt(), only for SO_PEERCRED: the ids it reports are real. */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_getsockopt};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
+    f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, 17 /* SO_PEERCRED */};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     /* socket(AF_NETLINK, *, NETLINK_AUDIT): SELinux says EACCES, which PAM
      * takes for a broken audit system (su and sudo fail); a kernel without
-     * audit says EPROTONOSUPPORT. */
+     * audit says EPROTONOSUPPORT. Burrow makes no such socket itself. */
     f[i++] = (struct sock_filter){JEQ, 0, 6, NR_socket};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 16}; /* args[0], low half */
     f[i++] = (struct sock_filter){JEQ, 0, 2, 16 /* AF_NETLINK */};
@@ -101,18 +103,19 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){JEQ, 0, 1, PR_SET_KEEPCAPS};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 0};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
-    /* ioctl(DRM_IOCTL_VERSION) only: the render node is KGSL, see do_drm_version(). */
-    f[i++] = (struct sock_filter){JEQ, 0, 4, NR_ioctl};
-    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 24}; /* args[1], low half */
-    f[i++] = (struct sock_filter){JEQ, 0, 1, DRM_IOCTL_VERSION};
+    for (unsigned t = 0; t < N_TRAPPED; t++) f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, trapped[t]};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* The trap, unless the call comes from Burrow's gadget. */
+    int trap = i;
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 12}; /* instruction pointer, high half */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, (uint32_t) (gadget >> 32)};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 8};
+    f[i++] = (struct sock_filter){JEQ, 2, 0, (uint32_t) gadget + 4};
+    f[i++] = (struct sock_filter){JEQ, 1, 0, (uint32_t) gadget};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
-    /* mprotect() of an executable stack only, see do_mprotect(). */
-    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_mprotect};
-    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 32}; /* args[2], low half */
-    f[i++] = (struct sock_filter){JEQ, 0, 1, EXEC_STACK};
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
-    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    for (int j = 0; j < trap; j++)
+        if (f[j].code == JEQ && f[j].jt == TO_TRAP) f[j].jt = (uint8_t) (trap - j - 1);
     struct {
         unsigned short len;
         struct sock_filter* filter;
