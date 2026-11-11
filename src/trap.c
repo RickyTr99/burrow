@@ -776,14 +776,12 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     while (b[l] && b[l] != '/' && l < 15) name[l] = b[l], l++;
     name[l] = 0;
     uint32_t set_ids_mode = 0; /* S_ISUID and S_ISGID of the file itself (scripts' are ignored, as by Linux) */
-    char x86_host[PATH_MAX]; /* an x86 program, run by cfg.x86 */
-    x86_host[0] = 0;
     for (int depth = 0;; depth++) {
-        struct kstat st;
         r = to_host(guest, !(flags & AT_SYMLINK_NOFOLLOW), host, resolved);
-        if (r >= 0) r = sys(NR_newfstatat, AT_FDCWD, host, &st, 0);
-        /* -x names an interpreter that is not installed (yet): as with none. */
-        if (r < 0) return x86_host[0] && r == -ENOENT ? -ENOEXEC : r;
+        if (r < 0) return r;
+        struct kstat st;
+        r = sys(NR_newfstatat, AT_FDCWD, host, &st, 0);
+        if (r < 0) return r;
         if ((st.mode & S_IFMT) != S_IFREG) return -EACCES;
         if (depth == 0) set_ids_mode = st.mode & (S_ISUID | S_ISGID);
         r = sys(NR_faccessat, AT_FDCWD, host, X_OK, 0);
@@ -796,23 +794,8 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
         if (n < 0) return n;
         h[n] = 0;
         if (n >= 20 && h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F') {
-            uint16_t machine = *(uint16_t*) (h + 18);
-            if (h[4] == 2 /* ELFCLASS64 */ && machine == 183 /* EM_AARCH64 */) break;
-            int x86 = (h[4] == 2 && machine == 62 /* EM_X86_64 */) || (h[4] == 1 && machine == 3 /* EM_386 */);
-            if (!x86 || !cfg.x86[0] || x86_host[0]) return -ENOEXEC;
-            if (depth == 3) return -ELOOP;
-            /* As binfmt_misc with flags "POC" (FEX's): "interpreter file argv[0] args[1..]",
-             * the file open in AT_EXECFD, the file's set-ids. */
-            copy(x86_host, sizeof(x86_host), host);
-            memmove(head + 2, head, head_count * sizeof(*head));
-            head[0] = cfg.x86;
-            head[1] = file;
-            head_count += 2;
-            file = cfg.x86;
-            flags &= ~AT_SYMLINK_NOFOLLOW;
-            r = guest_absolute(AT_FDCWD, cfg.x86, guest);
-            if (r < 0) return r;
-            continue;
+            if (h[4] != 2 /* ELFCLASS64 */ || *(uint16_t*) (h + 18) != 183 /* EM_AARCH64 */) return -ENOEXEC;
+            break;
         }
         char *interpreter, *argument;
         if (!shebang(h, n, &interpreter, &argument)) return -ENOEXEC;
@@ -851,13 +834,9 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     for (int i = 0; i < ID_COUNT; i++) old_ids[i] = id(i);
     if (set_ids_mode & S_ISUID) set_id(EUID, 0), set_id(SUID, 0), set_id(FSUID, 0);
     if (set_ids_mode & S_ISGID) set_id(EGID, 0), set_id(SGID, 0), set_id(FSGID, 0);
-    long exec_fd = x86_host[0] ? sys(NR_openat, AT_FDCWD, x86_host, O_RDONLY, 0) : -1;
-    cfg.exec_fd = exec_fd;
-    r = x86_host[0] && exec_fd < 0 ? exec_fd : encode_config(state + 7, state_size - 7, resolved, host, name);
-    cfg.exec_fd = -1;
+    r = encode_config(state + 7, state_size - 7, resolved, host, name);
     for (int i = 0; i < ID_COUNT; i++) set_id(i, old_ids[i]);
     if (r < 0) {
-        if (x86_host[0] && exec_fd >= 0) sys(NR_close, exec_fd, 0, 0, 0);
         sys(NR_munmap, block, size, 0, 0);
         return r;
     }
@@ -874,7 +853,6 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     new_envp[e++] = state;
     new_envp[e] = 0;
     r = sys(NR_execve, cfg.self, new_argv, new_envp, 0);
-    if (x86_host[0]) sys(NR_close, exec_fd, 0, 0, 0);
     sys(NR_munmap, block, size, 0, 0);
     return r;
 }

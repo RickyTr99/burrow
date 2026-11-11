@@ -12,7 +12,6 @@
 #define ET_EXEC 2
 #define ET_DYN 3
 #define AT_NULL 0
-#define AT_EXECFD 2
 #define AT_PHDR 3
 #define AT_PHENT 4
 #define AT_PHNUM 5
@@ -121,18 +120,8 @@ void load_and_run(long* sp) {
     long e = 0;
     while (envp[e]) e++;
     uint64_t* auxv = (uint64_t*) (envp + e + 1);
-    uint64_t* a = auxv;
-    for (; a[0] != AT_NULL; a += 2)
+    for (uint64_t* a = auxv; a[0] != AT_NULL; a += 2)
         if (a[0] == AT_PAGESZ) page_size = a[1];
-    if (cfg.exec_fd >= 0) {
-        /* AT_EXECFD for the x86 interpreter: the vectors move down into the
-         * gap _start left below the stack, keeping its alignment. */
-        memmove(sp - 2, sp, (char*) a - (char*) sp);
-        sp -= 2;
-        auxv -= 2;
-        a[-2] = AT_EXECFD;
-        a[-1] = (uint64_t) cfg.exec_fd;
-    }
 
     struct image program, interpreter = {0, 0, 0, 0};
     char interp[PATH_MAX], host[PATH_MAX];

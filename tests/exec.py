@@ -56,18 +56,6 @@ with open(d + "/junk", "w") as out:
 os.chmod(d + "/junk", 0o755)
 ok(error_of(lambda: os.execv(d + "/junk", ["junk"])) == errno.ENOEXEC, "not a program: ENOEXEC")
 
-# An x86-64 program goes to -x's interpreter; make check passes x86-interp.py.
-with open(d + "/x86", "wb") as out:
-    out.write(b"\x7fELF\x02\x01\x01" + bytes(11) + b"\x3e\x00" + bytes(44))
-os.chmod(d + "/x86", 0o755)
-try:
-    out = subprocess.run(["name", "arg"], executable=d + "/x86", capture_output=True, text=True).stdout
-except OSError as e:
-    out = ""
-    ok(e.errno == errno.ENOEXEC, "an x86 program with no interpreter, or one that is missing: ENOEXEC")
-if out.startswith("x86-interp"):
-    ok(out == "x86-interp %s/x86 name arg exec_fd=%s/x86\n" % (d, d), "an x86 program: interpreter, file, argv[0], AT_EXECFD")
-
 pid = os.fork()
 if pid == 0:
     os.execve("/bin/sh", ["sh", "-c", 'exit "$CODE"'], {"CODE": "7"})

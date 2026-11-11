@@ -6,8 +6,6 @@
     .type _start, %function
 _start:
     mov x0, sp
-    // A gap below the kernel's vectors, for the loader to grow the auxiliary vector into.
-    sub sp, sp, #64
     mov x29, xzr
     mov x30, xzr
     bl burrow_main
