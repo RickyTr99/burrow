@@ -616,6 +616,7 @@ static long do_sendto(const uint64_t* x) {
 static long do_recvfrom(const uint64_t* x) {
     long r = sys6(NR_recvfrom, (long) x[0], (long) x[1], (long) x[2], (long) x[3], (long) x[4], (long) x[5]);
     char* from = (char*) x[4];
+    if (r >= 0 && from != 0 && x[5] != 0 && *(const uint32_t*) x[5] == 12) netlink_name(from, 12, 0);
     if (r < 0 || cfg.dns_port == 0 || from == 0 || x[5] == 0 || *(const uint32_t*) x[5] < 8 ||
         *(const uint16_t*) from != AF_INET)
         return r;
@@ -643,6 +644,7 @@ static long do_sockname(long nr, long fd, char* addr, uint32_t* length) {
             n = (uint32_t) (2 + g + 1);
         }
     }
+    netlink_name(a, n, nr == NR_getsockname);
     if (length == 0) return -EFAULT;
     memcpy(addr, a, *length < n ? *length : n);
     *length = n;
@@ -1237,9 +1239,13 @@ static long emulate(long nr, const uint64_t* x) {
         dirfd = AT_FDCWD;
         ON_HOST(!(x[2] & IN_DONT_FOLLOW), sys(NR_inotify_add_watch, x[0], host, x[2], 0));
     case NR_bind:
-    case NR_connect: return do_socket_path(nr, (long) x[0], (const char*) x[1], (long) x[2]);
-    case NR_sendmsg: return do_sendmsg((long) x[0], (const struct kmsghdr*) x[1], (long) x[2]);
-    case NR_sendto: return do_sendto(x);
+    case NR_connect: return netlink_bind((long) x[0], do_socket_path(nr, (long) x[0], (const char*) x[1], (long) x[2]));
+    case NR_sendmsg: {
+        const struct kmsghdr* m = (const struct kmsghdr*) x[1];
+        long r = do_sendmsg((long) x[0], m, (long) x[2]);
+        return r >= 0 || m == 0 ? r : netlink_sendmsg((long) x[0], m->iov, m->iovlen, r);
+    }
+    case NR_sendto: return netlink_send((long) x[0], (const void*) x[1], (long) x[2], do_sendto(x));
     case NR_recvfrom: return do_recvfrom(x);
     case NR_getsockname:
     case NR_getpeername: return do_sockname(nr, (long) x[0], (char*) x[1], (uint32_t*) x[2]);

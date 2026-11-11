@@ -274,6 +274,13 @@ void stats_step(int step, uint64_t start);
 /* sysv.c */
 long emulate_sysv(long nr, const uint64_t* x);
 
+/* netlink.c: route sockets Android refuses (bind(), RTM_GETLINK) answered by
+ * Burrow. Each takes the real call's result @r and returns the guest's. */
+long netlink_bind(long fd, long r);
+long netlink_send(long fd, const void* buf, long n, long r);
+long netlink_sendmsg(long fd, const void* iov, size_t count, long r);
+void netlink_name(char* addr, uint32_t length, int self); /* our socket's name as a netlink address */
+
 /* procfs.c: the files of /proc that Android refuses, made up. */
 int proc_file(const char* host); /* its index, -1 if none */
 long proc_open(int which, long flags);
