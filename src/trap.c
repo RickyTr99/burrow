@@ -779,11 +779,11 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     char x86_host[PATH_MAX]; /* an x86 program, run by cfg.x86 */
     x86_host[0] = 0;
     for (int depth = 0;; depth++) {
-        r = to_host(guest, !(flags & AT_SYMLINK_NOFOLLOW), host, resolved);
-        if (r < 0) return r;
         struct kstat st;
-        r = sys(NR_newfstatat, AT_FDCWD, host, &st, 0);
-        if (r < 0) return r;
+        r = to_host(guest, !(flags & AT_SYMLINK_NOFOLLOW), host, resolved);
+        if (r >= 0) r = sys(NR_newfstatat, AT_FDCWD, host, &st, 0);
+        /* -x names an interpreter that is not installed (yet): as with none. */
+        if (r < 0) return x86_host[0] && r == -ENOENT ? -ENOEXEC : r;
         if ((st.mode & S_IFMT) != S_IFREG) return -EACCES;
         if (depth == 0) set_ids_mode = st.mode & (S_ISUID | S_ISGID);
         r = sys(NR_faccessat, AT_FDCWD, host, X_OK, 0);
