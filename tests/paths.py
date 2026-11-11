@@ -85,6 +85,9 @@ os.chdir(d)
 # /proc links
 ok(os.readlink("/proc/self/exe") == os.path.realpath(sys.executable), "/proc/self/exe is a guest path")
 ok(os.readlink("/proc/self/fd/%d" % fd) == d, "/proc/self/fd/N is a guest path")
+dirfd = os.open("/tmp", os.O_PATH | os.O_DIRECTORY)
+ok(os.path.exists("/proc/self/fd/%d/burrow-tests/paths.py" % dirfd), "a binding is seen through /proc/self/fd/N/")
+os.close(dirfd)
 ok(os.path.realpath(sys.executable) in open("/proc/self/maps").read(), "/proc/self/maps has guest paths")
 
 # Changes
