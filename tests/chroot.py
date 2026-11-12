@@ -31,6 +31,35 @@ ok(os.waitpid(pid, 0)[1] == 0, "the new root, its symlinks and its ..")
 ok(open("/etc/hostname").read() != "inner", "the parent keeps its root")
 pid = os.fork()
 if pid == 0:
+    import resource
+    resource.setrlimit(resource.RLIMIT_NOFILE, (0, 0))
+    os.chroot(d)
+    os.chdir("/")
+    os._exit(0)
+ok(os.waitpid(pid, 0)[1] == 0, "chroot and chdir without a free descriptor (Chromium's sandbox helper)")
+pid = os.fork()
+if pid == 0:
+    libc = ctypes.CDLL(None, use_errno=True)
+    child = libc.syscall(220, 0x200 | 17, 0, 0, 0, 0)  # clone(CLONE_FS | SIGCHLD)
+    if child == 0:
+        os.chroot(d)
+        os._exit(0)
+    os.waitpid(child, 0)
+    os._exit(0 if os.path.exists("/etc/marker") and not os.path.exists("/proc/self/exe") else 1)
+ok(os.waitpid(pid, 0)[1] == 0, "a chroot() of a clone(CLONE_FS) child is its parent's too, without /proc/self/exe")
+pid = os.fork()
+if pid == 0:
+    proc = os.open("/proc", os.O_RDONLY | os.O_DIRECTORY)
+    os.chroot(d)
+    try:
+        os.close(os.open("self/status", os.O_RDONLY, dir_fd=proc))
+        good = os.stat("self/task", dir_fd=proc) is not None
+    except OSError:
+        good = False
+    os._exit(0 if good else 1)
+ok(os.waitpid(pid, 0)[1] == 0, "paths relative to a directory opened before chroot() (Chromium's /proc)")
+pid = os.fork()
+if pid == 0:
     os.chdir(os.path.dirname(d))
     os.chroot(d)
     try:

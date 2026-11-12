@@ -136,7 +136,12 @@ as that user anyway.
 - `SEM_UNDO` is not kept: a process killed holding a semaphore leaves it taken.
 - `O_TMPFILE` is refused (`EOPNOTSUPP`) and `openat2()` with resolve flags is
   `ENOSYS`: programs fall back.
-- Chromium's own sandbox does not work (`--no-sandbox`); Electron apps do.
+- Chromium's sandbox works through its set-user-ID helper (`chrome-sandbox`,
+  shown as root's), without PID or network namespaces: `clone(CLONE_NEWPID)` is
+  `EINVAL`, as from a kernel without them. Its `chroot()` is Burrow's, so it
+  confines nothing; the seccomp filters of its processes are the kernel's. User
+  namespaces are missing, so a helper without the set-user-ID bit (AppImages)
+  needs `--no-sandbox`.
 - Mounts are bindings of the process: read-only mounts and tmpfs sizes are not
   enforced, and a mount does not show in `/proc/self/mountinfo`.
 

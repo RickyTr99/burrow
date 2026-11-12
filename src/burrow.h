@@ -51,8 +51,8 @@ enum {
     NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_rt_sigreturn = 139,NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
     NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159, NR_umask = 166, NR_prctl = 167,
-    NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
-    NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_getpeername = 205, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
+    NR_kill = 129, NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
+    NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_getpeername = 205, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_clone = 220, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
     NR_clone3 = 435, NR_faccessat2 = 439, NR_fchmodat2 = 452, NR_process_vm_readv = 270,
     NR_umount2 = 39, NR_mount = 40, NR_unshare = 97, NR_open_tree = 428, NR_move_mount = 429, NR_fsopen = 430,
@@ -63,7 +63,7 @@ enum {
 
 enum {
     EPERM = 1, ENOENT = 2, ESRCH = 3, EINTR = 4, EIO = 5, E2BIG = 7, ENOEXEC = 8, EBADF = 9, ENOMEM = 12, EACCES = 13,
-    EFAULT = 14, EXDEV = 18, ENOTDIR = 20, EISDIR = 21, EINVAL = 22, ERANGE = 34, ENAMETOOLONG = 36, ENOSYS = 38,
+    EFAULT = 14, EXDEV = 18, ENOTDIR = 20, EISDIR = 21, EINVAL = 22, EMFILE = 24, ERANGE = 34, ENAMETOOLONG = 36, ENOSYS = 38,
     ELOOP = 40,
 };
 
@@ -85,6 +85,7 @@ enum {
 #define S_ISUID 04000
 #define S_ISGID 02000
 #define S_IFDIR 0040000
+#define STATX_MODE 0x2u
 #define STATX_UID 0x8u
 #define STATX_GID 0x10u
 #define IN_DONT_FOLLOW 0x02000000
@@ -200,6 +201,7 @@ struct config {
     uint16_t dns_port;       /* the app's DNS proxy on 127.0.0.1, 0 if none */
     char stats[512];         /* the statistics file (-s), a host path; empty if none */
     char ipc[512];           /* SysV IPC's directory, a host path: in the first root, which chroot() keeps */
+    int fs_child;            /* a child sharing the root (clone(CLONE_FS)) whose chroot() is still to come, else 0 */
 };
 
 extern struct config cfg;
@@ -250,6 +252,11 @@ long host_path(long dirfd, const char* path, int follow, char* host);
 long host_to_guest(const char* host, char* out, long size);
 /* Records this process's root after chroot(), for /proc/<pid>/root in other processes. */
 void record_root(void);
+/* After chroot() in a child of clone(CLONE_FS): records the root for the parent. */
+void record_shared_root(void);
+/* The root a child of clone(CLONE_FS) @pid recorded, taken into @root (one
+ * use); its length, or 0 if none. */
+long take_shared_root(long pid, char* root, long size);
 /* Whether the guest sees the host path @host (in the root or a binding). */
 int guest_sees(const char* host);
 /* host_path() for a call that creates nothing, in one walk when it can: *@fd

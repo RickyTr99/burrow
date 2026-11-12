@@ -43,6 +43,7 @@ struct sock_filter {
 
 #define LD_ABS 0x20 /* BPF_LD | BPF_W | BPF_ABS */
 #define JEQ 0x15    /* BPF_JMP | BPF_JEQ | BPF_K */
+#define JSET 0x45   /* BPF_JMP | BPF_JSET | BPF_K */
 #define RET 0x06    /* BPF_RET | BPF_K */
 #define RET_ALLOW 0x7fff0000u
 #define RET_TRAP 0x00030000u
@@ -58,7 +59,7 @@ struct sock_filter {
  * 5.11), and it runs no filter at all for those syscalls, Android's neither. */
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[N_TRAPPED + 48];
+    struct sock_filter f[N_TRAPPED + 56];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -96,6 +97,17 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){JEQ, 1, 0, 9 /* NETLINK_AUDIT */};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 93 /* EPROTONOSUPPORT */};
+    /* clone(CLONE_NEWPID) is EINVAL, as from a kernel without PID namespaces
+     * (Android gives no /proc/self/ns/pid): Chromium's sandbox helper then goes
+     * on without one, where Android's EPERM stops it. A process sharing the
+     * root but not the memory (CLONE_FS alone) traps, see do_clone(). */
+    f[i++] = (struct sock_filter){JEQ, 0, 6, NR_clone};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 16}; /* args[0], low half */
+    f[i++] = (struct sock_filter){JSET, 0, 1, 0x20000000 /* CLONE_NEWPID */};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | EINVAL};
+    f[i++] = (struct sock_filter){JSET, 1, 0, 0x100 /* CLONE_VM */};
+    f[i++] = (struct sock_filter){JSET, TO_TRAP, 0, 0x200 /* CLONE_FS */};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     /* prctl(PR_SET_KEEPCAPS) succeeds: Android locks the bit (ping keeps
      * capabilities across setuid()), and the guest's capabilities are fake. */
     f[i++] = (struct sock_filter){JEQ, 0, 4, NR_prctl};
@@ -115,7 +127,7 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){RET, 0, 0, RET_TRAP | TRAP_DATA};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     for (int j = 0; j < trap; j++)
-        if (f[j].code == JEQ && f[j].jt == TO_TRAP) f[j].jt = (uint8_t) (trap - j - 1);
+        if ((f[j].code == JEQ || f[j].code == JSET) && f[j].jt == TO_TRAP) f[j].jt = (uint8_t) (trap - j - 1);
     struct {
         unsigned short len;
         struct sock_filter* filter;
@@ -131,10 +143,13 @@ static uint32_t id(int which) { return __atomic_load_n(&cfg.ids[which], __ATOMIC
 static void set_id(int which, uint32_t value) { __atomic_store_n(&cfg.ids[which], value, __ATOMIC_RELAXED); }
 
 /* Files the app owns show as the saved set-ids': root until a program drops
- * its ids (apt's _apt then finds its own files). */
-static void fake_owner(uint32_t* uid, uint32_t* gid) {
-    if (*uid == cfg.real_uid) *uid = id(SUID);
-    if (*gid == cfg.real_gid) *gid = id(SGID);
+ * its ids (apt's _apt then finds its own files). Set-user-ID and set-group-ID
+ * programs show as root's, whose ids they run with (Chromium's sandbox helper
+ * is refused otherwise). */
+static void fake_owner(uint32_t* uid, uint32_t* gid, uint32_t mode) {
+    int regular = (mode & S_IFMT) == S_IFREG;
+    if (*uid == cfg.real_uid) *uid = regular && (mode & S_ISUID) ? 0 : id(SUID);
+    if (*gid == cfg.real_gid) *gid = regular && (mode & S_ISGID) ? 0 : id(SGID);
 }
 
 static int one_of(uint32_t v, int base) { return v == id(base) || v == id(base + 1) || v == id(base + 2); }
@@ -226,6 +241,13 @@ static long do_sigprocmask(uint64_t* mask, long how, const uint64_t* set, uint64
  * Android's, or a kill(). */
 static void foreign(int sig, struct ksiginfo* info, struct kucontext* uc) {
     uintptr_t h = guest_sigsys.handler;
+    if (info->code == SYS_SECCOMP && info->call_addr == (uintptr_t) burrow_gadget + 4) {
+        /* Burrow's own call, which the guest's filter traps (Chromium's
+         * sandboxed processes trap openat2): it fails, as if missing,
+         * instead of crashing the guest. */
+        uc->mcontext.regs[0] = (uint64_t) -ENOSYS;
+        return;
+    }
     if (info->code == SYS_SECCOMP && info->errno_ == 0) {
         /* Android's app policy traps with a bare SECCOMP_RET_TRAP. */
         uint64_t* x = uc->mcontext.regs;
@@ -280,7 +302,7 @@ static void fake_stat(long r, struct kstat* st) {
     if (r != 0) return;
     if (on_shared_storage((st->dev >> 8) & 0xfff, (st->dev & 0xff) | ((st->dev >> 12) & 0xfff00)))
         st->uid = cfg.real_uid, st->gid = cfg.real_gid;
-    fake_owner(&st->uid, &st->gid);
+    fake_owner(&st->uid, &st->gid, st->mode);
 }
 
 static void fake_statx(long r, struct kstatx* stx) {
@@ -288,7 +310,7 @@ static void fake_statx(long r, struct kstatx* stx) {
     uint32_t uid = (stx->mask & STATX_UID) ? stx->uid : ~0u;
     uint32_t gid = (stx->mask & STATX_GID) ? stx->gid : ~0u;
     if (on_shared_storage(stx->dev_major, stx->dev_minor)) uid = cfg.real_uid, gid = cfg.real_gid;
-    fake_owner(&uid, &gid);
+    fake_owner(&uid, &gid, (stx->mask & STATX_MODE) ? stx->mode : 0);
     if (stx->mask & STATX_UID) stx->uid = uid;
     if (stx->mask & STATX_GID) stx->gid = gid;
 }
@@ -946,6 +968,45 @@ static long do_unshare(long flags) {
     return 0;
 }
 
+/* clone(CLONE_FS) without CLONE_VM: the kernel shares the working directory,
+ * but the root is Burrow's, in each process's memory. The child's chroot()
+ * goes to its parent through a record (record_shared_root()), which the
+ * parent takes at its next trap, also after an execve() (Chromium's sandbox:
+ * its helper chroot()s for the zygote, ChrootToSafeEmptyDir() for itself).
+ * The call is made here without its stack, so that the child returns
+ * through this handler, then on its own stack. */
+static int fs_parent; /* this process is such a child */
+
+static long do_clone(struct kucontext* uc) {
+    uint64_t* x = uc->mcontext.regs;
+    long r = sys6(NR_clone, (long) x[0], 0, (long) x[2], (long) x[3], (long) x[4], 0);
+    if (r == 0) {
+        fs_parent = 1;
+        cfg.fs_child = 0;
+        if (x[1] != 0) uc->mcontext.sp = x[1];
+    } else if (r > 0) {
+        cfg.fs_child = (int) r;
+    }
+    return r;
+}
+
+/* The root a child sharing it chroot()ed into, once it has. shortcut: the
+ * bindings below that root are not taken; chroot()s into an empty directory
+ * (Chromium's) have none. */
+static void take_child_root(void) {
+    char root[sizeof(cfg.root)];
+    long n = take_shared_root(cfg.fs_child, root, sizeof(root));
+    if (n > 0) {
+        memcpy(cfg.root, root, n + 1);
+        cfg.root_length = n;
+        cfg.bind_count = 0;
+        set_root_alias();
+        cfg.fs_child = 0;
+    } else if (sys(NR_kill, cfg.fs_child, 0, 0, 0) == -ESRCH) {
+        cfg.fs_child = 0;
+    }
+}
+
 /* The guest path @target resolved into @guest, without a trailing slash. */
 static long mount_point(const char* target, char* guest) {
     char absolute[PATH_MAX], host[PATH_MAX];
@@ -1060,11 +1121,23 @@ static long do_chroot(const char* path) {
     if (r >= 0) r = to_host(absolute, 1, host, guest);
     if (r < 0) return r;
     long fd = sys(NR_openat, AT_FDCWD, host, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
-    if (fd < 0) return fd;
-    char link[32] = "/proc/self/fd/";
-    format_unsigned(link + 14, (unsigned long) fd);
-    long n = sys(NR_readlinkat, AT_FDCWD, link, root, sizeof(root) - 1);
-    sys(NR_close, fd, 0, 0, 0);
+    long n;
+    if (fd == -EMFILE) {
+        /* No descriptor left (Chromium's sandbox helper sets RLIMIT_NOFILE to 0
+         * first): the host path as it is, checked to be a directory. */
+        struct kstat st;
+        if ((n = sys(NR_newfstatat, AT_FDCWD, host, &st, 0)) < 0) return n;
+        if ((st.mode & S_IFMT) != S_IFDIR) return -ENOTDIR;
+        n = length_of(host);
+        if (n >= (long) sizeof(root) - 1) return -ENAMETOOLONG;
+        memcpy(root, host, n);
+    } else {
+        if (fd < 0) return fd;
+        char link[32] = "/proc/self/fd/";
+        format_unsigned(link + 14, (unsigned long) fd);
+        n = sys(NR_readlinkat, AT_FDCWD, link, root, sizeof(root) - 1);
+        sys(NR_close, fd, 0, 0, 0);
+    }
     if (n <= 0) return n < 0 ? n : -ENOENT;
     if (n == (long) sizeof(root) - 1) return -ENAMETOOLONG;
     root[n] = 0;
@@ -1087,6 +1160,7 @@ static long do_chroot(const char* path) {
     cfg.root_length = n;
     set_root_alias();
     record_root();
+    if (fs_parent) record_shared_root();
     return 0;
 }
 
@@ -1372,6 +1446,11 @@ static void count(const struct ksiginfo* info, uint64_t* sums, uint64_t start) {
 
 static void on_trap(struct ksiginfo* info, struct kucontext* uc) {
     uint64_t* x = uc->mcontext.regs;
+    if (cfg.fs_child != 0) take_child_root();
+    if (info->syscall == NR_clone) {
+        x[0] = (uint64_t) do_clone(uc);
+        return;
+    }
     if (info->syscall == NR_rt_sigprocmask) {
         x[0] = (uint64_t) do_sigprocmask(&uc->sigmask, (long) x[0], (const uint64_t*) x[1], (uint64_t*) x[2],
                                          (long) x[3]);

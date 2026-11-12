@@ -38,6 +38,13 @@ ok(open("/proc/sys/kernel/overflowuid").read() == open("/proc/sys/kernel/overflo
    "overflowuid and overflowgid (bwrap)")
 ok(error_of(lambda: os.chown(d + "/root-file", 1000, 1000)) == 0, "chown")
 ok(ctypes.CDLL(None, use_errno=True).prctl(8, 1, 0, 0, 0) == 0, "prctl(PR_SET_KEEPCAPS)")
+libc = ctypes.CDLL(None, use_errno=True)
+ok(libc.syscall(220, 0x20000000 | 17, 0, 0, 0, 0) == -1 and ctypes.get_errno() == errno.EINVAL,
+   "clone(CLONE_NEWPID): EINVAL (Chromium's sandbox helper)")
+
+with open(d + "/setuid-file", "w"):
+    pass
+os.chmod(d + "/setuid-file", 0o4755)
 
 r, w = os.pipe()
 pid = os.fork()
@@ -57,6 +64,7 @@ if pid == 0:
     with open(d + "/user-file", "w"):
         pass
     check(os.stat(d + "/user-file").st_uid == 1000, "a new file is the user's")
+    check(os.stat(d + "/setuid-file").st_uid == 0, "a set-user-ID file is root's (Chromium's sandbox helper)")
     status = open("/proc/self/status").read()
     check("Uid:\t1000\t1000\t1000\t1000\n" in status, "/proc/self/status has the user's uid")
     check("Gid:\t1000\t1000\t1000\t1000\n" in status, "/proc/self/status has the user's gid")

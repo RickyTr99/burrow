@@ -153,7 +153,12 @@ static void tidy(char* p) {
     p[to] = 0;
 }
 
-long guest_absolute(long dirfd, const char* path, char* out) {
+/* guest_absolute(); with @outside, a path relative to a directory the guest
+ * cannot see (opened before a chroot(): Chromium's sandbox keeps /proc so)
+ * becomes its host path in @out, which the kernel resolves as from that
+ * directory, and *@outside is 1. */
+static long absolute(long dirfd, const char* path, char* out, int* outside) {
+    if (outside) *outside = 0;
     if (path[0] == '/') {
         long r = copy(out, PATH_MAX, path);
         if (r >= 0) tidy(out);
@@ -173,6 +178,13 @@ long guest_absolute(long dirfd, const char* path, char* out) {
         host[r] = 0;
         if (host[0] != '/') return -ENOTDIR; /* a pipe, a socket... */
     }
+    const char* guest;
+    if (outside && dirfd != AT_FDCWD && guest_part(host, &guest) == 0) {
+        long n = length_of(host);
+        if (n > 1) host[n++] = '/';
+        *outside = 1;
+        return join(out, host, n, path) < 0 ? -ENAMETOOLONG : 0;
+    }
     long n = host_to_guest(host, out, PATH_MAX);
     if (n < 0) return n;
     if (n > 1) out[n++] = '/';
@@ -180,6 +192,8 @@ long guest_absolute(long dirfd, const char* path, char* out) {
     if (r >= 0) tidy(out);
     return r < 0 ? r : 0;
 }
+
+long guest_absolute(long dirfd, const char* path, char* out) { return absolute(dirfd, path, out, 0); }
 
 /* Whether the absolute guest path @p has no empty, "." or ".." component (a
  * trailing slash apart): the kernel resolves it as we would, symlinks apart. */
@@ -341,8 +355,13 @@ static long walk(const char* path, int follow, char* host, char* out) {
     return 0;
 }
 
+/* /proc/self/exe, while the root has /proc bound (not after a chroot() into a
+ * directory without it: Chromium tells its sandbox's chroot() by this). */
 static int is_self_exe(const char* p) {
-    return same(p, "/proc/self/exe") || same(p, "/proc/thread-self/exe");
+    if (!same(p, "/proc/self/exe") && !same(p, "/proc/thread-self/exe")) return 0;
+    for (int i = 0; i < cfg.bind_count; i++)
+        if (same(cfg.binds[i].guest, "/proc")) return 1;
+    return 0;
 }
 
 /* The rest of @p after /proc/<pid>/root (self and thread-self too), "" if
@@ -417,6 +436,37 @@ void record_root(void) {
     sys(NR_symlinkat, cfg.root, AT_FDCWD, path, 0);
 }
 
+/* The record of the root a child of clone(CLONE_FS) chroot()ed into, for its
+ * parent: <first root>/tmp/.burrow-roots/fs-<pid>, a symlink to it. */
+static long shared_root_record(char* out, unsigned long pid) {
+    long r = root_record(out, 0, 0);
+    if (r < 0) return r;
+    char* e = out + length_of(out);
+    memcpy(e, "/fs-", 4);
+    format_unsigned(e + 4, pid);
+    return 0;
+}
+
+void record_shared_root(void) {
+    char path[PATH_MAX];
+    if (shared_root_record(path, 0) < 0) return;
+    path[length_of(path) - 5] = 0; /* the directory, without "/fs-0" */
+    sys(NR_mkdirat, AT_FDCWD, path, 0700, 0);
+    shared_root_record(path, (unsigned long) sys(NR_getpid, 0, 0, 0, 0));
+    sys(NR_unlinkat, AT_FDCWD, path, 0, 0);
+    sys(NR_symlinkat, cfg.root, AT_FDCWD, path, 0);
+}
+
+long take_shared_root(long pid, char* root, long size) {
+    char path[PATH_MAX];
+    if (shared_root_record(path, (unsigned long) pid) < 0) return 0;
+    long n = sys(NR_readlinkat, AT_FDCWD, path, root, size - 1);
+    if (n <= 0 || n >= size - 1) return 0;
+    root[n] = 0;
+    sys(NR_unlinkat, AT_FDCWD, path, 0, 0);
+    return n;
+}
+
 /* The guest path, in this process's root, of the root of process @pid (or of
  * its nearest ancestor that called chroot()) into @out; 0 if none is known or
  * this root does not hold it. shortcut: bindings of that root are not seen
@@ -482,8 +532,10 @@ long host_fd(long dirfd, const char* path, int follow, char* host, long* fd) {
     *fd = -1;
     if (path == 0) return -EFAULT;
     if (path[0] == 0) return -ENOENT;
-    long r = guest_absolute(dirfd, path, guest);
+    int outside;
+    long r = absolute(dirfd, path, guest, &outside);
     if (r < 0) return r;
+    if (outside) return copy(host, PATH_MAX, guest) < 0 ? -ENAMETOOLONG : 0;
     if (!direct(guest)) return to_host(guest, follow, host, 0);
     uint64_t start = stats_start();
     r = host_of(guest, length_of(guest), host);
@@ -505,9 +557,10 @@ long open_direct(long dirfd, const char* path, long flags, long mode) {
     char guest[PATH_MAX], host[PATH_MAX];
     if (path == 0) return -EFAULT;
     if (path[0] == 0) return -ENOENT;
-    long r = guest_absolute(dirfd, path, guest);
+    int outside;
+    long r = absolute(dirfd, path, guest, &outside);
     if (r < 0) return r;
-    if (!direct(guest)) return -ELOOP;
+    if (outside || !direct(guest)) return -ELOOP; /* host_path() then */
     uint64_t start = stats_start();
     r = host_of(guest, length_of(guest), host);
     if (r < 0) return r;
@@ -521,6 +574,9 @@ long host_path(long dirfd, const char* path, int follow, char* host) {
     char guest[PATH_MAX];
     if (path == 0) return -EFAULT;
     if (path[0] == 0) return -ENOENT;
-    long r = guest_absolute(dirfd, path, guest);
-    return r < 0 ? r : to_host(guest, follow, host, 0);
+    int outside;
+    long r = absolute(dirfd, path, guest, &outside);
+    if (r < 0) return r;
+    if (outside) return copy(host, PATH_MAX, guest) < 0 ? -ENAMETOOLONG : 0;
+    return to_host(guest, follow, host, 0);
 }
