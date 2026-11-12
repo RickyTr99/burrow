@@ -62,6 +62,20 @@ static void add_bind(const char* spec) {
     while (b->host_length > 1 && b->host[b->host_length - 1] == '/') b->host[--b->host_length] = 0;
 }
 
+/* The first line of the guest's /etc/hostname, as a boot would set it. */
+static void read_hostname(void) {
+    char host[PATH_MAX], buf[sizeof(cfg.hostname)];
+    if (host_path(AT_FDCWD, "/etc/hostname", 1, host) < 0) return;
+    long fd = sys(NR_openat, AT_FDCWD, host, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return;
+    long n = sys(NR_read, fd, buf, sizeof(buf) - 1, 0);
+    sys(NR_close, fd, 0, 0, 0);
+    long length = 0;
+    while (length < n && buf[length] != '\n' && buf[length] != ' ' && buf[length] != '\t') length++;
+    memcpy(cfg.hostname, buf, length);
+    cfg.hostname[length] = 0;
+}
+
 /* -- Supervisor ---------------------------------------------------------------- */
 
 #define NR_kill 129
@@ -217,6 +231,7 @@ static void launch(long argc, char** argv, char** envp) {
     char host[PATH_MAX];
     long r = host_path(AT_FDCWD, workdir, 1, host);
     if (r < 0 || sys(NR_chdir, host, 0, 0, 0) < 0) die("cannot enter ", workdir);
+    read_hostname();
 
     sys(NR_prctl, PR_SET_CHILD_SUBREAPER, 1, 0, 0);
     struct ksigaction stop = {(uintptr_t) on_stop, 0, 0, 0};

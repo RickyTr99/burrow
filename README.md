@@ -82,7 +82,10 @@ costs compare directly, the others give the order of magnitude.
 - On Android: the files of `/proc` SELinux refuses to apps, made up
   (`/proc/version`, `/proc/stat`, `/proc/uptime`...); the guest's nameserver
   127.0.0.53 sent to a DNS proxy of the app (`-d`); `DRM_IOCTL_VERSION` on the
-  KGSL device.
+  KGSL device; netlink route sockets (`bind()` and `RTM_GETLINK`, which Android
+  refuses: `ip`, `getifaddrs()`).
+- The host name: `uname()` gives the guest's `/etc/hostname`, read when Burrow
+  starts, as a system sets it at boot (Android's is `localhost`).
 - Go programs (goroutine stacks, async preemption) and programs with their own
   seccomp filters or `SIGSYS` handlers (Firefox, Chromium, Electron apps).
 
@@ -133,6 +136,8 @@ as that user anyway.
 
 ## Limits
 
+- `sethostname()` is the host's (`EPERM`): the name changes with `/etc/hostname`
+  and a new start.
 - `SEM_UNDO` is not kept: a process killed holding a semaphore leaves it taken.
 - `O_TMPFILE` is refused (`EOPNOTSUPP`) and `openat2()` with resolve flags is
   `ENOSYS`: programs fall back.

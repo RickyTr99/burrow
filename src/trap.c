@@ -24,7 +24,7 @@ static const uint16_t trapped[] = {
     NR_openat, NR_readlinkat, NR_getdents64, NR_newfstatat, NR_fstat, NR_utimensat, NR_rt_sigaction, NR_rt_sigprocmask,
     NR_rt_sigreturn,
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
-    NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
+    NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_uname, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
     NR_sendto, NR_recvfrom, NR_getsockname, NR_getpeername, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt, NR_chroot,
     NR_semget, NR_semctl, NR_semtimedop, NR_semop, NR_msgget, NR_msgctl, NR_msgrcv, NR_msgsnd,
@@ -1377,6 +1377,13 @@ static long emulate(long nr, const uint64_t* x) {
         memcpy(cfg.groups, (const uint32_t*) x[1], size * sizeof(uint32_t));
         cfg.group_count = (int) size;
         return 0;
+    }
+
+    case NR_uname: {
+        /* Android's is "localhost": the guest's own name, as a system set up from /etc/hostname at boot. */
+        long r = sys(NR_uname, x[0], 0, 0, 0);
+        if (r == 0 && cfg.hostname[0]) memcpy((char*) x[0] + 65, cfg.hostname, sizeof(cfg.hostname));
+        return r;
     }
 
     case NR_lseek:

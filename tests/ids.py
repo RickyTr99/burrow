@@ -91,5 +91,11 @@ if pid == 0:
     os._exit(0 if os.getresuid() == (1000, 0, 0) else 1)
 ok(os.waitpid(pid, 0)[1] == 0, "setresuid with a saved 0, then setuid(0)")
 
+try:
+    name = open("/etc/hostname").read().split()[0][:64]
+except (OSError, IndexError):
+    name = None
+ok(name is None or os.uname().nodename == name, "uname()'s nodename is /etc/hostname's")
+
 shutil.rmtree(d)
 sys.exit(1 if fails else 0)

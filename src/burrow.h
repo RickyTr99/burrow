@@ -50,7 +50,7 @@ enum {
     NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80, NR_utimensat = 88, NR_exit_group = 94,
     NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_rt_sigreturn = 139,NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
-    NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159, NR_umask = 166, NR_prctl = 167,
+    NR_getresgid = 150, NR_uname = 160, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159, NR_umask = 166, NR_prctl = 167,
     NR_kill = 129, NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
     NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_getpeername = 205, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_clone = 220, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
@@ -202,6 +202,7 @@ struct config {
     char stats[512];         /* the statistics file (-s), a host path; empty if none */
     char ipc[512];           /* SysV IPC's directory, a host path: in the first root, which chroot() keeps */
     int fs_child;            /* a child sharing the root (clone(CLONE_FS)) whose chroot() is still to come, else 0 */
+    char hostname[65];       /* the guest's /etc/hostname at launch, uname()'s nodename; empty for the kernel's */
 };
 
 extern struct config cfg;

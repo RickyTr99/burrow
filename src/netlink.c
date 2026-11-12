@@ -305,7 +305,9 @@ static long requests(long fd, const char* name, const char* buf, long n) {
     uint32_t pid = (uint32_t) sys(NR_getpid, 0, 0, 0, 0);
     for (long at = 0; at + (long) sizeof(struct nlmsghdr) <= n;) {
         const struct nlmsghdr* h = (const struct nlmsghdr*) (buf + at);
-        if (h->len < sizeof(*h) || (long) h->len > n - at) return -EINVAL;
+        /* The kernel stops there and takes the whole buffer (netlink_rcv_skb): iproute2 sends its
+         * request structure whole, the message and zeros after it. */
+        if (h->len < sizeof(*h) || (long) h->len > n - at) break;
         if (h->type == RTM_GETLINK) {
             get_link(fd, name, h, pid);
         } else {

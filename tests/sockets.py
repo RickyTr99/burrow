@@ -74,6 +74,17 @@ while not done:
                 a += (n + 3) & ~3
         at += (length + 3) & ~3
 ok(b"lo" in names, "RTM_GETLINK dump")
+# iproute2 sends its request structure whole: the message, then zeros (taken, as the kernel does).
+nl.send(struct.pack("=LHHLLBBBBI", 24, 22, 0x301, 8, 0, 2, 0, 0, 0, 0) + bytes(128))  # RTM_GETADDR dump, IPv4
+done, addresses = False, 0
+while not done:
+    data, at = nl.recv(65536), 0
+    while at + 16 <= len(data):
+        length, kind = struct.unpack_from("=LH", data, at)
+        done |= kind in (2, 3)  # NLMSG_ERROR, NLMSG_DONE
+        addresses += kind == 20  # RTM_NEWADDR
+        at += (length + 3) & ~3
+ok(addresses > 0, "RTM_GETADDR dump with padding after the message")
 nl.close()
 os.chdir("/")
 shutil.rmtree(d)
