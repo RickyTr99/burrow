@@ -152,8 +152,8 @@ as that user anyway.
   namespaces are missing, so a helper without the set-user-ID bit (AppImages)
   needs `--no-sandbox`.
 - Mounts are bindings of the process: read-only mounts and tmpfs sizes are not
-  enforced, and only `-b` bindings show in `/proc/self/mountinfo` (with the
-  process's own: every process gets those).
+  enforced, `/proc/<pid>/mountinfo` shows bindings only (no tmpfs), and every
+  process reads its own there, whichever pid it asks for.
 
 ## Tests
 
