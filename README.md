@@ -67,6 +67,10 @@ costs compare directly, the others give the order of magnitude.
   the process and its children (walked like the rootfs when its source is in
   it, so its symlinks are guest paths); other mounts and namespaces pretend.
   The new mount API (`open_tree`...) is `ENOSYS`, and programs fall back.
+- `/proc/<pid>/mounts` and `mountinfo` as the guest sees them: `/` is the
+  filesystem holding the rootfs, each binding a mount at its guest path, with
+  the host's mounts below its source (`df`, `findmnt`, file managers). `..`
+  out of a binding goes back to the guest's tree (`/sdcard/..` is `/`).
 - An executable stack, which `ld.so` asks for libraries that want one: Android
   refuses it, the request succeeds and the stack stays as it is.
 - Ids: proot's fake_id0. The guest starts as root, `setuid()` and friends,
@@ -148,7 +152,8 @@ as that user anyway.
   namespaces are missing, so a helper without the set-user-ID bit (AppImages)
   needs `--no-sandbox`.
 - Mounts are bindings of the process: read-only mounts and tmpfs sizes are not
-  enforced, and a mount does not show in `/proc/self/mountinfo`.
+  enforced, and only `-b` bindings show in `/proc/self/mountinfo` (with the
+  process's own: every process gets those).
 
 ## Tests
 

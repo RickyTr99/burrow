@@ -259,6 +259,15 @@ static long probe(const char* guest, int follow, char* host, char* resolved) {
     return r == 0 || r == -ENOENT || r == -ENOTDIR || r == -EACCES ? r : -ELOOP;
 }
 
+/* Whether @rest has a ".." component: it may leave a binding (/sdcard/..)
+ * or reach another (/dev/pts/../shm), which the host would not know. */
+static int has_parent(const char* rest) {
+    for (long i = 0; rest[i]; i++)
+        if (rest[i] == '.' && rest[i + 1] == '.' && (i == 0 || rest[i - 1] == '/') && (rest[i + 2] == 0 || rest[i + 2] == '/'))
+            return 1;
+    return 0;
+}
+
 /* The slow path: resolves @path one component at a time. */
 static long walk(const char* path, int follow, char* host, char* out) {
     char rest[PATH_MAX], target[PATH_MAX];
@@ -294,7 +303,7 @@ static long walk(const char* path, int follow, char* host, char* out) {
         int last = rest[after] == 0;
 
         const struct bind* b = binding_of(out, n);
-        if (b != 0 && !b->walked && !binds_below(out, n)) {
+        if (b != 0 && !b->walked && !binds_below(out, n) && !has_parent(rest + at)) {
             /* The host resolves the rest: /proc's magic links, /dev's... */
             long h = join(host, b->host, b->host_length, out + b->guest_length);
             if (h < 0) return h;

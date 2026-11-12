@@ -488,6 +488,284 @@ long proc_maps_open(const char* host, long flags) {
     return read_only(o.fd, flags);
 }
 
+/* /proc/<pid>/mounts and mountinfo list Android's mounts (the system's
+ * erofs as /, apexes, vendor partitions): the guest's instead, as its own
+ * root sees them. / is the mount holding the rootfs, each binding is a mount
+ * at its guest path, and the host's mounts below a binding's source (/dev/pts,
+ * /sys/fs/...) show below it. df, findmnt, Dolphin and bwrap read them. Every
+ * process gets this process's bindings. */
+int proc_mounts(const char* host) {
+    long n = length_of(host);
+    if (n < 12 || !starts_with(host, "/proc/")) return 0;
+    if (same(host + n - 10, "/mountinfo")) return 2;
+    return same(host + n - 7, "/mounts") ? 1 : 0;
+}
+
+struct host_mount {
+    char *majmin, *root, *point, *options, *tail; /* tail: optional fields, "-", type, source, super options */
+};
+
+struct guest_mount {
+    char guest[512];
+    char root[512];
+    struct host_mount* from;
+    int parent;
+};
+
+#define HOST_TEXT (1 << 20)
+#define MAX_MOUNTS 1024
+#define MOUNTS_AREA (HOST_TEXT + MAX_MOUNTS * (sizeof(struct host_mount) + sizeof(struct guest_mount)))
+
+/* Decodes mountinfo's octal escapes (\040) in place. */
+static void unescape(char* s) {
+    char* to = s;
+    for (; *s; s++) {
+        if (s[0] == '\\' && s[1] >= '0' && s[1] <= '3' && s[2] >= '0' && s[2] <= '7' && s[3] >= '0' && s[3] <= '7') {
+            *to++ = (char) ((s[1] - '0') * 64 + (s[2] - '0') * 8 + (s[3] - '0'));
+            s += 3;
+        } else {
+            *to++ = *s;
+        }
+    }
+    *to = 0;
+}
+
+static void out_string(struct output* o, const char* s) {
+    out_put(o, s, length_of(s));
+}
+
+/* @s with mountinfo's escapes for space, tab, newline and backslash. */
+static void out_escaped(struct output* o, const char* s) {
+    for (; *s; s++) {
+        unsigned char c = (unsigned char) *s;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\\') {
+            char e[4] = {'\\', (char) ('0' + (c >> 6)), (char) ('0' + ((c >> 3) & 7)), (char) ('0' + (c & 7))};
+            out_put(o, e, 4);
+        } else {
+            out_put(o, s, 1);
+        }
+    }
+}
+
+/* Whether @path is @dir or below it. */
+static int at_or_below(const char* path, const char* dir) {
+    long n = length_of(dir);
+    if (n == 1 && dir[0] == '/') return 1;
+    return starts_with(path, dir) && (path[n] == 0 || path[n] == '/');
+}
+
+/* Splits the host's mountinfo in @text into @mounts; their count. */
+static int parse_mounts(char* text, struct host_mount* mounts) {
+    int count = 0;
+    for (char* line = text; *line && count < MAX_MOUNTS;) {
+        char* end = line;
+        while (*end && *end != '\n') end++;
+        char* next = *end ? end + 1 : end;
+        *end = 0;
+        char* field[6];
+        char* p = line;
+        int f = 0;
+        for (; f < 6 && *p; f++) { /* id, parent, major:minor, root, mount point, options */
+            field[f] = p;
+            while (*p && *p != ' ') p++;
+            if (*p) *p++ = 0;
+        }
+        if (f == 6 && *p) {
+            struct host_mount* m = &mounts[count++];
+            m->majmin = field[2];
+            m->root = field[3];
+            m->point = field[4];
+            m->options = field[5];
+            m->tail = p;
+            unescape(m->root);
+            unescape(m->point);
+        }
+        line = next;
+    }
+    return count;
+}
+
+/* The mount @host is on: the deepest mount point above it, the last mounted of equals. */
+static struct host_mount* mount_of(struct host_mount* mounts, int count, const char* host) {
+    struct host_mount* best = 0;
+    long best_length = -1;
+    for (int i = 0; i < count; i++) {
+        long n = length_of(mounts[i].point);
+        if (n >= best_length && at_or_below(host, mounts[i].point)) {
+            best = &mounts[i];
+            best_length = n;
+        }
+    }
+    return best;
+}
+
+/* Adds @guest, from @from at @root below its own root; the new count. */
+static int add_mount(struct guest_mount* out, int count, const char* guest, struct host_mount* from, const char* root) {
+    if (count >= MAX_MOUNTS) return count;
+    struct guest_mount* g = &out[count];
+    long base = same(from->root, "/") ? 0 : length_of(from->root);
+    if (length_of(guest) >= (long) sizeof(g->guest) || base + length_of(root) >= (long) sizeof(g->root)) return count;
+    append(g->guest, guest);
+    memcpy(g->root, from->root, base);
+    append(g->root + base, *root ? root : base ? "" : "/");
+    g->from = from;
+    return count + 1;
+}
+
+/* Android's own mounts below /dev: binder, USB gadgets, cgroup v1 controllers. */
+static int android_only(const struct host_mount* m) {
+    static const char* const types[] = {"- binder ", "- functionfs ", "- cgroup "};
+    for (unsigned i = 0; i < sizeof(types) / sizeof(*types); i++)
+        for (const char* p = m->tail; *p; p++)
+            if (starts_with(p, types[i])) return 1;
+    return 0;
+}
+
+/* Whether a binding deeper than @self covers @guest. */
+static int covered(const char* guest, int self) {
+    for (int i = 0; i < cfg.bind_count; i++)
+        if (cfg.binds[i].guest_length > cfg.binds[self].guest_length && at_or_below(guest, cfg.binds[i].guest))
+            return 1;
+    return 0;
+}
+
+/* The type, source and super options of a mount's @tail (cut in place). */
+static int tail_fields(char* tail, char** type, char** source, char** super) {
+    char* p = tail;
+    while (*p && !(p[0] == '-' && (p == tail || p[-1] == ' ') && p[1] == ' ')) p++;
+    if (!*p) return 0;
+    p += 2;
+    *type = p;
+    while (*p && *p != ' ') p++;
+    if (!*p) return 0;
+    *p++ = 0;
+    *source = p;
+    while (*p && *p != ' ') p++;
+    if (*p) *p++ = 0;
+    *super = p;
+    return 1;
+}
+
+static void out_number(struct output* o, unsigned long v) {
+    char number[24];
+    format_unsigned(number, v);
+    out_string(o, number);
+}
+
+static void write_mounts(struct output* o, struct guest_mount* out, int count, int info) {
+    for (int i = 0; i < count; i++) {
+        struct guest_mount* g = &out[i];
+        char tail[1024];
+        if (copy(tail, sizeof(tail), g->from->tail) < 0) continue;
+        if (info) {
+            out_number(o, (unsigned long) (20 + i));
+            out_string(o, " ");
+            out_number(o, (unsigned long) (g->parent < 0 ? 1 : 20 + g->parent));
+            out_string(o, " ");
+            out_string(o, g->from->majmin);
+            out_string(o, " ");
+            out_escaped(o, g->root);
+            out_string(o, " ");
+            out_escaped(o, g->guest);
+            out_string(o, " ");
+            out_string(o, g->from->options);
+            out_string(o, " ");
+            out_string(o, tail);
+        } else {
+            char *type, *source, *super;
+            if (!tail_fields(tail, &type, &source, &super)) continue;
+            out_string(o, source);
+            out_string(o, " ");
+            out_escaped(o, g->guest);
+            out_string(o, " ");
+            out_string(o, type);
+            out_string(o, " ");
+            out_string(o, g->from->options);
+            /* The super options after their rw or ro, as the kernel lists both. */
+            while (*super && *super != ',') super++;
+            out_string(o, super);
+            out_string(o, " 0 0");
+        }
+        out_string(o, "\n");
+    }
+}
+
+/* The guest's mounts from the host's @mounts into @out: / first, then each binding and the host's mounts below it. */
+static int guest_mounts(struct host_mount* mounts, int hosts, struct guest_mount* out) {
+    struct host_mount* root = mount_of(mounts, hosts, cfg.root);
+    if (root == 0) return 0;
+    int count = add_mount(out, 0, "/", root, "/");
+    if (count) memcpy(out[0].root, "/", 2); /* the guest's root is the whole of it */
+    for (int b = 0; b < cfg.bind_count; b++) {
+        struct bind* bind = &cfg.binds[b];
+        struct host_mount* m = mount_of(mounts, hosts, bind->host);
+        if (m == 0) continue;
+        /* From the rootfs, it is below the guest's / (findmnt's "[/tmp/x]"). */
+        if (count && at_or_below(bind->host, cfg.root) && bind->host_length > cfg.root_length)
+            count = add_mount(out, count, bind->guest, out[0].from, bind->host + cfg.root_length);
+        else
+            count = add_mount(out, count, bind->guest, m, same(m->point, "/") ? bind->host : bind->host + length_of(m->point));
+        if (bind->walked) continue;
+        for (int i = 0; i < hosts; i++) {
+            const char* point = mounts[i].point;
+            if (same(point, bind->host) || !at_or_below(point, bind->host)) continue;
+            if (android_only(&mounts[i])) continue;
+            char guest[512];
+            const char* rest = point + bind->host_length;
+            if (bind->guest_length + length_of(rest) >= (long) sizeof(guest)) continue;
+            append(append(guest, bind->guest), rest);
+            if (!covered(guest, b)) count = add_mount(out, count, guest, &mounts[i], "");
+        }
+    }
+    /* Each mount's parent: the deepest one above it, or an earlier one at the same place. */
+    for (int i = 0; i < count; i++) {
+        long length = length_of(out[i].guest), best = -1;
+        out[i].parent = -1;
+        for (int j = 0; j < count; j++) {
+            long n = length_of(out[j].guest);
+            if (j == i || n <= best || !at_or_below(out[i].guest, out[j].guest) || (n == length && j > i)) continue;
+            out[i].parent = j;
+            best = n;
+        }
+        if (i == 0) out[i].parent = -1;
+    }
+    return count;
+}
+
+long proc_mounts_open(const char* host, long flags) {
+    if ((flags & 3) != O_RDONLY) return -EACCES;
+    long in = sys(NR_openat, AT_FDCWD, host, O_RDONLY | O_CLOEXEC, 0);
+    if (in < 0) return in;
+    long info = sys(NR_openat, AT_FDCWD, "/proc/self/mountinfo", O_RDONLY | O_CLOEXEC, 0);
+    char* area = (char*) sys6(NR_mmap, 0, MOUNTS_AREA, 3 /* PROT_READ | PROT_WRITE */,
+                              0x22 /* MAP_PRIVATE | MAP_ANONYMOUS */, -1, 0);
+    long error = info < 0 ? info : (unsigned long) area > -4096UL ? (long) area : 0;
+    if (error) {
+        if (info >= 0) sys(NR_close, info, 0, 0, 0);
+        else sys(NR_munmap, area, MOUNTS_AREA, 0, 0);
+        sys(NR_close, in, 0, 0, 0);
+        return error;
+    }
+    long used = 0, n;
+    while (used < HOST_TEXT - 1 && (n = sys(NR_read, info, area + used, HOST_TEXT - 1 - used, 0)) > 0) used += n;
+    sys(NR_close, info, 0, 0, 0);
+    area[used] = 0;
+    struct host_mount* mounts = (struct host_mount*) (area + HOST_TEXT);
+    struct guest_mount* out = (struct guest_mount*) (mounts + MAX_MOUNTS);
+    int count = guest_mounts(mounts, parse_mounts(area, mounts), out);
+    struct output o;
+    o.used = 0;
+    o.fd = scratch("mounts", flags);
+    if (o.fd >= 0) {
+        write_mounts(&o, out, count, proc_mounts(host) == 2);
+        sys(NR_write, o.fd, o.buf, o.used, 0);
+        remember_copy(o.fd, in);
+    }
+    sys(NR_munmap, area, MOUNTS_AREA, 0, 0);
+    sys(NR_close, in, 0, 0, 0);
+    return o.fd < 0 ? o.fd : read_only(o.fd, flags);
+}
+
 /* /proc/<pid>/status has the app's uid and gid: the guest's instead, as
  * fake_owner() shows files (ps's user, "own processes" of system monitors). */
 int proc_status(const char* host) {

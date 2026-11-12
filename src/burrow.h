@@ -296,6 +296,8 @@ void proc_rewind(long fd); /* lseek(fd, 0, SEEK_SET): a made-up file's content m
 int proc_maps(const char* host); /* 1 for /proc/<pid>/maps */
 long proc_maps_open(const char* host, long flags);
 int proc_status(const char* host); /* 1 for /proc/<pid>/status */
+int proc_mounts(const char* host); /* 1 for /proc/<pid>/mounts, 2 for mountinfo */
+long proc_mounts_open(const char* host, long flags);
 long proc_status_open(const char* host, long flags);
 /* For @host, an fd link to a rewritten copy (maps, status): the /proc file it stands for in @out, its length; -1 if none. */
 long proc_copy_target(const char* host, char* out);

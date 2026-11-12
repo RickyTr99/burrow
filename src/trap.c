@@ -891,6 +891,7 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
 static long open_as_root(long nr, const char* host, long flags, long a, long b) {
     if (!(flags & O_PATH) && proc_maps(host)) return proc_maps_open(host, flags);
     if (!(flags & O_PATH) && proc_status(host)) return proc_status_open(host, flags);
+    if (!(flags & O_PATH) && proc_mounts(host)) return proc_mounts_open(host, flags);
     long r = sys(nr, AT_FDCWD, host, a, b);
     if (r == -ELOOP && (flags & O_NOFOLLOW) && !(flags & O_PATH)) {
         /* A faked hard link is its file, also unfollowed (ostree's checkouts). */

@@ -151,5 +151,20 @@ page = next(int(line.split("-")[0], 16) for line in open("/proc/self/maps") if l
 libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
 ok(libc.mprotect(page, os.sysconf("SC_PAGE_SIZE"), 0x01000007) == 0, "mprotect of an executable stack")
 
+# The guest's mounts: / first, the bindings at their guest paths, nothing of Android's own.
+info = [line.split() for line in open("/proc/self/mountinfo")]
+points = [fields[4] for fields in info]
+ids = {fields[0] for fields in info}
+ok(points[0] == "/" and info[0][3] == "/", "mountinfo: / first, whole")
+ok("/proc" in points and "/dev" in points and not any(p.startswith(("/apex", "/system", "/vendor")) for p in points),
+   "mountinfo: the bindings, no Android partitions")
+ok(all(fields[1] in ids for fields in info[1:]), "mountinfo: every parent listed")
+mounts = [line.split()[1] for line in open("/proc/mounts")]
+ok(mounts == points, "mounts lists the same")
+ok(os.path.ismount("/proc") and not os.path.ismount("/usr"), "ismount")
+# ".." from a binding is the guest's, not the host's.
+ok(os.path.realpath("/proc/..") == "/" and os.stat("/proc/..").st_ino == os.stat("/").st_ino, "/proc/.. is /")
+ok(os.stat("/proc/self/../../etc").st_ino == os.stat("/etc").st_ino, ".. out of a binding, deeper")
+
 shutil.rmtree(d)
 sys.exit(1 if fails else 0)
