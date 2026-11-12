@@ -170,12 +170,9 @@ static long absolute(long dirfd, const char* path, char* out, int* outside) {
         r = sys(NR_getcwd, host, PATH_MAX, 0, 0);
         if (r < 0) return r;
     } else {
-        char link[32] = "/proc/self/fd/";
         if ((int) dirfd < 0) return -EBADF;
-        format_unsigned(link + 14, (unsigned long) (int) dirfd);
-        r = sys(NR_readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
+        r = fd_path((int) dirfd, host, PATH_MAX);
         if (r < 0) return -EBADF;
-        host[r] = 0;
         if (host[0] != '/') return -ENOTDIR; /* a pipe, a socket... */
     }
     const char* guest;

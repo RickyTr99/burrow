@@ -86,3 +86,11 @@ void die(const char* a, const char* b) {
     sys(NR_exit_group, 127, 0, 0, 0);
     __builtin_unreachable();
 }
+
+long fd_path(long fd, char* out, long size) {
+    char link[32] = "/proc/self/fd/";
+    format_unsigned(link + 14, (unsigned long) fd);
+    long n = sys(NR_readlinkat, AT_FDCWD, link, out, size - 1);
+    if (n >= 0) out[n] = 0;
+    return n;
+}

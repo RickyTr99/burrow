@@ -333,11 +333,8 @@ long proc_open(int which, long flags) {
 /* Programs that keep /proc/stat open (top, ksystemstats) read it again from
  * the start: the content of a made-up file is made again then. */
 void proc_rewind(long fd) {
-    char link[32] = "/proc/self/fd/", target[64];
-    format_unsigned(link + 14, (unsigned long) fd);
-    long n = sys(NR_readlinkat, AT_FDCWD, link, target, sizeof(target) - 1);
-    if (n <= 0) return;
-    target[n] = 0;
+    char target[64];
+    if (fd_path(fd, target, sizeof(target)) <= 0) return;
     if (!starts_with(target, "/memfd:" MEMFD_PREFIX)) return;
     const char* p = target + 7 + sizeof(MEMFD_PREFIX) - 1;
     unsigned long which = parse_unsigned(&p);
@@ -388,12 +385,10 @@ static unsigned copies_next;
 
 /* Remembers that @copy stands for @in, the real file it was made from. */
 static void remember_copy(long copy, long in) {
-    char link[32] = "/proc/self/fd/", path[sizeof(copies->path)];
-    format_unsigned(link + 14, (unsigned long) in);
-    long n = sys(NR_readlinkat, AT_FDCWD, link, path, sizeof(path) - 1);
+    char path[sizeof(copies->path)];
+    long n = fd_path(in, path, sizeof(path));
     struct kstat st;
     if (n <= 0 || n >= (long) sizeof(path) - 1 || sys(NR_fstat, copy, &st, 0, 0) < 0) return;
-    path[n] = 0;
     struct copy_of* c = &copies[__atomic_fetch_add(&copies_next, 1, __ATOMIC_RELAXED) % COPIES];
     __atomic_store_n(&c->ino, 0, __ATOMIC_RELEASE);
     c->dev = st.dev;

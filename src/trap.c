@@ -26,7 +26,7 @@ static const uint16_t trapped[] = {
     NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid, NR_setresgid, NR_getresgid,
     NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_uname, NR_getuid, NR_geteuid, NR_getgid, NR_getegid, NR_bind, NR_connect,
     NR_execve, NR_renameat2, NR_execveat, NR_statx, NR_openat2, NR_faccessat2, NR_fchmodat2, NR_sendmsg,
-    NR_sendto, NR_recvfrom, NR_getsockname, NR_getpeername, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt, NR_chroot,
+    NR_sendto, NR_getsockname, NR_getpeername, NR_shmget, NR_shmctl, NR_shmat, NR_shmdt, NR_chroot,
     NR_semget, NR_semctl, NR_semtimedop, NR_semop, NR_msgget, NR_msgctl, NR_msgrcv, NR_msgsnd,
     NR_clone3, /* ENOSYS, as under Android: CLONE_CLEAR_SIGHAND would drop our handler */
     NR_mount, NR_umount2, NR_unshare,
@@ -59,7 +59,7 @@ struct sock_filter {
  * 5.11), and it runs no filter at all for those syscalls, Android's neither. */
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[N_TRAPPED + 56];
+    struct sock_filter f[N_TRAPPED + 64];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -114,6 +114,16 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 16}; /* args[0], low half */
     f[i++] = (struct sock_filter){JEQ, 0, 1, PR_SET_KEEPCAPS};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ERRNO | 0};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* recvfrom() traps only with an address (the DNS proxy's answers): recv()
+     * passes (Firefox's and curl's network, PipeWire). */
+    f[i++] = (struct sock_filter){JEQ, 0, 7, NR_recvfrom};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 48}; /* args[4], low half */
+    f[i++] = (struct sock_filter){JEQ, 0, 2, 0};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 52}; /* high half */
+    f[i++] = (struct sock_filter){JEQ, 2, 0, 0};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 0}; /* nr again: a jump to the trap */
+    f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, NR_recvfrom};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     for (unsigned t = 0; t < N_TRAPPED; t++) f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, trapped[t]};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
@@ -340,11 +350,7 @@ static long do_statfs(long nr, const uint64_t* x) {
         if ((r = sys(NR_statfs, host, x[1], 0, 0)) < 0) return r;
     } else {
         if ((r = sys(NR_fstatfs, x[0], x[1], 0, 0)) < 0) return r;
-        char link[32] = "/proc/self/fd/";
-        format_unsigned(link + 14, (unsigned long) x[0]);
-        long n = sys(NR_readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
-        if (n <= 0) return 0;
-        host[n] = 0;
+        if (fd_path((long) x[0], host, PATH_MAX) <= 0) return 0;
     }
     long* type = (long*) x[1]; /* f_type, the first field */
     if (*type == SYSFS_MAGIC || *type == CGROUP2_MAGIC || host[0] != '/' || !guest_sees(host) ||
@@ -713,11 +719,8 @@ static long do_peercred(const uint64_t* x) {
 static long do_drm_version(const uint64_t* x) {
     long r = sys(NR_ioctl, x[0], x[1], x[2], 0);
     if (r != -25 /* ENOTTY */ && r != -EINVAL) return r;
-    char link[32] = "/proc/self/fd/", target[32];
-    format_unsigned(link + 14, (unsigned long) (int) x[0]);
-    long n = sys(NR_readlinkat, AT_FDCWD, link, target, sizeof(target) - 1);
-    if (n < 0) return r;
-    target[n] = 0;
+    char target[32];
+    if (fd_path((int) x[0], target, sizeof(target)) < 0) return r;
     if (!same(target, "/dev/kgsl-3d0")) return r;
     struct drm_version {
         int major, minor, patchlevel;
@@ -783,11 +786,7 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     if (path == 0) return -EFAULT;
     head[0] = argv != 0 ? argv[0] : 0;
     if (empty(path) && (flags & AT_EMPTY_PATH)) {
-        char link[32] = "/proc/self/fd/";
-        format_unsigned(link + 14, (unsigned long) (int) dirfd);
-        r = sys(NR_readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
-        if (r < 0) return -EBADF;
-        host[r] = 0;
+        if (fd_path((int) dirfd, host, PATH_MAX) < 0) return -EBADF;
         r = host_to_guest(host, guest, PATH_MAX);
     } else {
         if (path[0] == 0) return -ENOENT;
@@ -917,11 +916,8 @@ static long l2s_path_fd(long fd, long flags) {
     struct kstat st;
     if (fd < 0 || (flags & (O_PATH | O_NOFOLLOW)) != (O_PATH | O_NOFOLLOW)) return fd;
     if (sys(NR_fstat, fd, &st, 0, 0) < 0 || (st.mode & S_IFMT) != S_IFLNK) return fd;
-    char link[32] = "/proc/self/fd/", host[PATH_MAX], final[PATH_MAX];
-    format_unsigned(link + 14, (unsigned long) fd);
-    long n = sys(NR_readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
-    if (n <= 0) return fd;
-    host[n] = 0;
+    char host[PATH_MAX], final[PATH_MAX];
+    if (fd_path(fd, host, PATH_MAX) <= 0) return fd;
     if (!l2s_file(host, final)) return fd;
     long r = sys(NR_openat, AT_FDCWD, final, flags, 0);
     if (r < 0) return fd;
@@ -1134,9 +1130,7 @@ static long do_chroot(const char* path) {
         memcpy(root, host, n);
     } else {
         if (fd < 0) return fd;
-        char link[32] = "/proc/self/fd/";
-        format_unsigned(link + 14, (unsigned long) fd);
-        n = sys(NR_readlinkat, AT_FDCWD, link, root, sizeof(root) - 1);
+        n = fd_path(fd, root, sizeof(root));
         sys(NR_close, fd, 0, 0, 0);
     }
     if (n <= 0) return n < 0 ? n : -ENOENT;
@@ -1257,11 +1251,8 @@ static long emulate(long nr, const uint64_t* x) {
         long r;
         if (empty(path) && (flags & AT_EMPTY_PATH)) {
             /* The file of descriptor @dirfd, by its host path: an unnamed one (O_TMPFILE) cannot get a name. */
-            char link[32] = "/proc/self/fd/";
-            format_unsigned(link + 14, (unsigned long) dirfd);
-            r = sys(NR_readlinkat, AT_FDCWD, link, from, PATH_MAX - 1);
+            r = fd_path(dirfd, from, PATH_MAX);
             if (r < 0) return r == -ENOENT ? -EBADF : r;
-            from[r] = 0;
             if (from[0] != '/' || (r > 10 && same(from + r - 10, " (deleted)"))) return -ENOENT;
             flags = 0;
         } else {

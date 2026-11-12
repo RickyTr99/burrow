@@ -236,6 +236,8 @@ int same(const char* a, const char* b);
 int starts_with(const char* s, const char* prefix);
 long copy(char* to, long size, const char* from); /* -ENAMETOOLONG if it does not fit */
 char* format_unsigned(char* to, unsigned long value);
+/* What /proc/self/fd/@fd links to (a host path, "pipe:[...]"...), terminated; its length or -errno. */
+long fd_path(long fd, char* out, long size);
 unsigned long parse_unsigned(const char** s);
 void say(const char* a, const char* b, const char* c);
 __attribute__((noreturn)) void die(const char* a, const char* b);
