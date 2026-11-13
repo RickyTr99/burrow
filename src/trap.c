@@ -59,7 +59,7 @@ struct sock_filter {
  * 5.11), and it runs no filter at all for those syscalls, Android's neither. */
 long install_filter(void) {
     uint64_t gadget = (uint64_t) burrow_gadget;
-    struct sock_filter f[N_TRAPPED + 64];
+    struct sock_filter f[N_TRAPPED + 80];
     int i = 0;
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 4}; /* arch */
     f[i++] = (struct sock_filter){JEQ, 1, 0, AUDIT_ARCH_AARCH64};
@@ -124,6 +124,11 @@ long install_filter(void) {
     f[i++] = (struct sock_filter){JEQ, 2, 0, 0};
     f[i++] = (struct sock_filter){LD_ABS, 0, 0, 0}; /* nr again: a jump to the trap */
     f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, NR_recvfrom};
+    f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
+    /* ptrace(PTRACE_TRACEME) only, see do_traceme(). */
+    f[i++] = (struct sock_filter){JEQ, 0, 3, NR_ptrace};
+    f[i++] = (struct sock_filter){LD_ABS, 0, 0, 16}; /* args[0], low half */
+    f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, 0 /* PTRACE_TRACEME */};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
     for (unsigned t = 0; t < N_TRAPPED; t++) f[i++] = (struct sock_filter){JEQ, TO_TRAP, 0, trapped[t]};
     f[i++] = (struct sock_filter){RET, 0, 0, RET_ALLOW};
@@ -682,21 +687,24 @@ static long do_sockname(long nr, long fd, char* addr, uint32_t* length) {
     return 0;
 }
 
-/* The emulated ids of Burrow process @pid, read where Burrow keeps them:
- * its image is at the same address in every process. */
-static int peer_ids(long pid, uint32_t* ids) {
+long peer_read(long pid, void* local, const void* remote, long size) {
     char link[48] = "/proc/", exe[512];
     char* end = format_unsigned(link + 6, (unsigned long) pid);
     memcpy(end, "/exe", 5);
     long n = sys(NR_readlinkat, AT_FDCWD, link, exe, sizeof(exe) - 1);
-    if (n <= 0) return 0;
+    if (n <= 0) return n < 0 ? n : -ESRCH;
     exe[n] = 0;
-    if (!same(exe, cfg.self)) return 0;
+    if (!same(exe, cfg.self)) return -ESRCH;
     struct {
-        void* base;
+        const void* base;
         size_t length;
-    } local = {ids, sizeof(cfg.ids)}, remote = {cfg.ids, sizeof(cfg.ids)};
-    return sys6(NR_process_vm_readv, pid, (long) &local, 1, (long) &remote, 1, 0) == (long) sizeof(cfg.ids);
+    } to = {local, (size_t) size}, from = {remote, (size_t) size};
+    return sys6(NR_process_vm_readv, pid, (long) &to, 1, (long) &from, 1, 0);
+}
+
+/* The emulated ids of Burrow process @pid, read where Burrow keeps them. */
+static int peer_ids(long pid, uint32_t* ids) {
+    return peer_read(pid, ids, cfg.ids, sizeof(cfg.ids)) == (long) sizeof(cfg.ids);
 }
 
 /* getsockopt(SO_PEERCRED): the peer's real ids become its fake ones, root's
@@ -749,6 +757,23 @@ static long do_drm_version(const uint64_t* x) {
 static void* map(long size) {
     long p = sys6(NR_mmap, 0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return p < 0 && p > -4096 ? 0 : (void*) p;
+}
+
+/* ptrace(PTRACE_TRACEME) in a vfork() child waits for its execve(), made
+ * then by the loader once the program is in place (load_and_run()). Made
+ * here, the child's next trap would stop it for its tracer, which waits for
+ * that execve() (gdb's run hung). Such a child may only exec or exit; one of
+ * fork() (gdb's check of ptrace, which stops itself) is traced at once. The
+ * thread is recorded, not a flag: the child writes its parent's memory. */
+static long traceme_tid, vm_probe;
+
+static long do_traceme(void) {
+    long tid = sys(NR_gettid, 0, 0, 0, 0), parent = 0;
+    vm_probe = tid;
+    if (peer_read(sys(NR_getppid, 0, 0, 0, 0), &parent, &vm_probe, sizeof(parent)) != sizeof(parent) || parent != tid)
+        return sys(NR_ptrace, 0 /* PTRACE_TRACEME */, 0, 0, 0);
+    traceme_tid = tid;
+    return 0;
 }
 
 /* Reads "#!interpreter [argument]" from @head (@n bytes). Returns 1 with the
@@ -860,7 +885,9 @@ long emulate_execve(long dirfd, const char* path, char* const* argv, char* const
     for (int i = 0; i < ID_COUNT; i++) old_ids[i] = id(i);
     if (set_ids_mode & S_ISUID) set_id(EUID, 0), set_id(SUID, 0), set_id(FSUID, 0);
     if (set_ids_mode & S_ISGID) set_id(EGID, 0), set_id(SGID, 0), set_id(FSGID, 0);
+    cfg.traced = traceme_tid != 0 && traceme_tid == sys(NR_gettid, 0, 0, 0, 0);
     r = encode_config(state + 7, state_size - 7, resolved, host, name);
+    cfg.traced = 0;
     for (int i = 0; i < ID_COUNT; i++) set_id(i, old_ids[i]);
     if (r < 0) {
         sys(NR_munmap, block, size, 0, 0);
@@ -891,6 +918,7 @@ static long open_as_root(long nr, const char* host, long flags, long a, long b) 
     if (!(flags & O_PATH) && proc_maps(host)) return proc_maps_open(host, flags);
     if (!(flags & O_PATH) && proc_status(host)) return proc_status_open(host, flags);
     if (!(flags & O_PATH) && proc_mounts(host)) return proc_mounts_open(host, flags);
+    if (!(flags & O_PATH) && proc_auxv(host)) return proc_auxv_open(host, flags);
     long r = sys(nr, AT_FDCWD, host, a, b);
     if (r == -ELOOP && (flags & O_NOFOLLOW) && !(flags & O_PATH)) {
         /* A faked hard link is its file, also unfollowed (ostree's checkouts). */
@@ -1215,6 +1243,7 @@ static long emulate(long nr, const uint64_t* x) {
     case NR_mount: return do_mount((const char*) x[0], (const char*) x[1], (long) x[3]);
     case NR_umount2: return do_umount((const char*) x[0]);
     case NR_unshare: return do_unshare((long) x[0]);
+    case NR_ptrace: return do_traceme();
     case NR_mprotect: return do_mprotect(x);
     case NR_mkdirat: ON_HOST(0, sys(NR_mkdirat, AT_FDCWD, host, x[2], 0));
     case NR_mknodat: ON_HOST(0, sys(NR_mknodat, AT_FDCWD, host, x[2], x[3]));

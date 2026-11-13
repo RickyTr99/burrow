@@ -143,6 +143,15 @@ void load_and_run(long* sp) {
         case AT_EXECFN: a[1] = (uint64_t) cfg.exe; break;
         }
     }
+    cfg.auxv = auxv;
     sys(NR_prctl, 15 /* PR_SET_NAME */, cfg.name, 0, 0);
+    /* The stop a debugger waits for after the execve() of a PTRACE_TRACEME
+     * child, here with the program and its interpreter in place: at the
+     * kernel's, this image had only Burrow, and gdb took Burrow for it. */
+    if (cfg.traced) {
+        cfg.traced = 0;
+        sys(NR_ptrace, 0 /* PTRACE_TRACEME */, 0, 0, 0);
+        sys(NR_tgkill, sys(NR_getpid, 0, 0, 0, 0), sys(NR_gettid, 0, 0, 0, 0), 5 /* SIGTRAP */, 0);
+    }
     burrow_jump(entry, sp);
 }

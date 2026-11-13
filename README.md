@@ -90,6 +90,10 @@ costs compare directly, the others give the order of magnitude.
   refuses: `ip`, `getifaddrs()`).
 - The host name: `uname()` gives the guest's `/etc/hostname`, read when Burrow
   starts, as a system sets it at boot (Android's is `localhost`).
+- Debuggers: `/proc/<pid>/auxv` is the guest program's (its entry and program
+  headers, the interpreter's base), so `gdb -p` finds its libraries; a
+  `vfork()` child's `PTRACE_TRACEME` waits for its `execve()`, and the program
+  stops once loaded (gdb's `run`).
 - Go programs (goroutine stacks, async preemption) and programs with their own
   seccomp filters or `SIGSYS` handlers (Firefox, Chromium, Electron apps).
 
@@ -151,6 +155,10 @@ as that user anyway.
   confines nothing; the seccomp filters of its processes are the kernel's. User
   namespaces are missing, so a helper without the set-user-ID bit (AppImages)
   needs `--no-sandbox`.
+- A traced program stops at each trapped syscall (`SIGSYS`): gdb needs
+  `handle SIGSYS nostop noprint pass`. An `execve()` of a program already
+  traced stops before the new program is loaded, so gdb's `run` needs
+  `set startup-with-shell off`, and following an `execve()` sees no libraries.
 - Mounts are bindings of the process: read-only mounts and tmpfs sizes are not
   enforced, `/proc/<pid>/mountinfo` shows bindings only (no tmpfs), and every
   process reads its own there, whichever pid it asks for.
@@ -162,9 +170,9 @@ make check ROOTFS=/path/to/rootfs      # perl and python3 in the rootfs
 ```
 
 The tests run inside a guest (`tests/run.sh`): paths, ids, exec, sockets,
-chroot, SysV IPC, and a Go program when `tests/go/burrowtest` is built
-(`GOOS=linux GOARCH=arm64 go build -o burrowtest main.go` in `tests/go`). The
-CI runs them on GitHub's arm64 runners with a Debian rootfs.
+chroot, mounts, debuggers, SysV IPC, and a Go program when `tests/go/burrowtest`
+is built (`GOOS=linux GOARCH=arm64 go build -o burrowtest main.go` in
+`tests/go`). The CI runs them on GitHub's arm64 runners with a Debian rootfs.
 
 ## License
 

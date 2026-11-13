@@ -831,3 +831,53 @@ long proc_statx(struct kstatx* stx) {
     stx->uid = stx->gid = 0;
     return 0;
 }
+
+/* /proc/<pid>/auxv is the kernel's, for Burrow's binary: its entry, its
+ * program headers, no interpreter (gdb found no libraries and no backtrace).
+ * The guest's instead, which the loader left on the process's stack; the
+ * kernel's for a process with no program loaded (the launcher). */
+int proc_auxv(const char* host) {
+    long n = length_of(host);
+    return n > 10 && starts_with(host, "/proc/") && same(host + n - 5, "/auxv");
+}
+
+#define AUXV_WORDS 256
+
+/* The auxiliary vector of the process of @path (after "/proc/") into @out, with its AT_NULL; its size or 0. */
+static long guest_auxv(const char* path, uint64_t* out) {
+    long n;
+    if (starts_with(path, "self/") || starts_with(path, "thread-self/")) {
+        if (cfg.auxv == 0) return 0;
+        /* Pair by pair: the stack may end soon after the vector. */
+        for (n = 0; n < AUXV_WORDS; n += 2) {
+            out[n] = cfg.auxv[n], out[n + 1] = cfg.auxv[n + 1];
+            if (out[n] == 0) return (n + 2) * 8;
+        }
+        return 0;
+    }
+    const char* p = path;
+    long pid = (long) parse_unsigned(&p);
+    uint64_t* remote = 0;
+    if (p == path || *p != '/' || peer_read(pid, &remote, &cfg.auxv, sizeof(remote)) != sizeof(remote) || remote == 0)
+        return 0;
+    /* A read stopped by the end of the stack is short, not failed. */
+    n = peer_read(pid, out, remote, AUXV_WORDS * 8) / 8;
+    for (long i = 0; i + 1 < n; i += 2)
+        if (out[i] == 0) return (i + 2) * 8;
+    return 0;
+}
+
+long proc_auxv_open(const char* host, long flags) {
+    uint64_t auxv[AUXV_WORDS];
+    long size = (flags & 3) == O_RDONLY ? guest_auxv(host + 6, auxv) : 0;
+    if (size == 0) return sys(NR_openat, AT_FDCWD, host, flags, 0);
+    long in = sys(NR_openat, AT_FDCWD, host, O_RDONLY | O_CLOEXEC, 0);
+    if (in < 0) return in;
+    long fd = scratch("auxv", flags);
+    if (fd >= 0) {
+        sys(NR_write, fd, auxv, size, 0);
+        remember_copy(fd, in);
+    }
+    sys(NR_close, in, 0, 0, 0);
+    return fd < 0 ? fd : read_only(fd, flags);
+}

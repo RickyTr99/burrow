@@ -50,8 +50,8 @@ enum {
     NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80, NR_utimensat = 88, NR_exit_group = 94,
     NR_tgkill = 131, NR_sigaltstack = 132, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_rt_sigreturn = 139,NR_setregid = 143, NR_setgid = 144,
     NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148, NR_setresgid = 149,
-    NR_getresgid = 150, NR_uname = 160, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159, NR_umask = 166, NR_prctl = 167,
-    NR_kill = 129, NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
+    NR_getresgid = 150, NR_uname = 160, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159, NR_umask = 166, NR_prctl = 167, NR_ptrace = 117,
+    NR_kill = 129, NR_getpid = 172, NR_getppid = 173, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
     NR_socket = 198, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_getpeername = 205, NR_sendto = 206, NR_recvfrom = 207, NR_getsockopt = 209, NR_sendmsg = 211, NR_munmap = 215, NR_clone = 220, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_seccomp = 277, NR_execveat = 281, NR_statx = 291, NR_openat2 = 437,
     NR_clone3 = 435, NR_faccessat2 = 439, NR_fchmodat2 = 452, NR_process_vm_readv = 270,
@@ -203,6 +203,8 @@ struct config {
     char ipc[512];           /* SysV IPC's directory, a host path: in the first root, which chroot() keeps */
     int fs_child;            /* a child sharing the root (clone(CLONE_FS)) whose chroot() is still to come, else 0 */
     char hostname[65];       /* the guest's /etc/hostname at launch, uname()'s nodename; empty for the kernel's */
+    int traced;              /* ptrace(PTRACE_TRACEME) made before the execve(): taken once the program is loaded */
+    uint64_t* auxv;          /* the guest's auxiliary vector, on its stack once loaded; else 0 */
 };
 
 extern struct config cfg;
@@ -276,6 +278,10 @@ void install_handler(void);
 long install_filter(void);
 long emulate_execve(long dirfd, const char* path, char* const* argv, char* const* envp, long flags);
 
+/* Reads @size bytes at @remote in Burrow process @pid (its image is at the
+ * same address in every process) into @local; the bytes read or -errno. */
+long peer_read(long pid, void* local, const void* remote, long size);
+
 /* Statistics (-s): Burrow's own steps, counted past the syscalls. */
 enum { STATS_PROBE = 500, STATS_WALK = 501, STATS_OPEN = 502 };
 uint64_t stats_start(void);
@@ -300,6 +306,8 @@ long proc_maps_open(const char* host, long flags);
 int proc_status(const char* host); /* 1 for /proc/<pid>/status */
 int proc_mounts(const char* host); /* 1 for /proc/<pid>/mounts, 2 for mountinfo */
 long proc_mounts_open(const char* host, long flags);
+int proc_auxv(const char* host); /* 1 for /proc/<pid>/auxv */
+long proc_auxv_open(const char* host, long flags);
 long proc_status_open(const char* host, long flags);
 /* For @host, an fd link to a rewritten copy (maps, status): the /proc file it stands for in @out, its length; -1 if none. */
 long proc_copy_target(const char* host, char* out);
