@@ -1508,9 +1508,10 @@ static __attribute__((noinline)) void on_sigsys(int sig, struct ksiginfo* info, 
 
 /* The handler needs tens of KB, more than the signal stacks guests set up
  * (Firefox's threads: 20 KB, Go's: 32 KB), so it runs on one of these, owned
- * by a thread id. The stack is also the thread's sigaltstack meanwhile: a
- * nested signal (a trapped syscall in a guest SIGSYS handler) must go below
- * it, not at the top of the guest's sigaltstack, where the outer frame lives. */
+ * by a thread id. When the thread has a sigaltstack, the stack is also its
+ * sigaltstack meanwhile: a nested signal (a trapped syscall in a guest SIGSYS
+ * handler) must go below it, not at the top of the guest's sigaltstack, where
+ * the outer frame lives. Without one, a nested signal goes below it anyway. */
 #define STACKS 32
 #define STACK_SIZE (128 * 1024)
 static char* stacks;
@@ -1555,7 +1556,8 @@ static int claim_stack(void) {
 static void on_our_stack(int sig, struct ksiginfo* info, struct kucontext* uc) {
     int slot = (int) (((char*) __builtin_frame_address(0) - stacks) / STACK_SIZE);
     struct kstack ours = {stacks + (long) slot * STACK_SIZE, 0, STACK_SIZE};
-    stack_switched[slot] = sys(NR_sigaltstack, &ours, &saved_stack[slot], 0, 0) == 0;
+    stack_switched[slot] = !(uc->stack.flags & 2 /* SS_DISABLE */) &&
+                           sys(NR_sigaltstack, &ours, &saved_stack[slot], 0, 0) == 0;
     sys(NR_rt_sigprocmask, SIG_SETMASK, &uc->sigmask, 0, 8);
     on_sigsys(sig, info, uc);
 }

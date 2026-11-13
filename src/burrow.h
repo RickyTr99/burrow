@@ -79,6 +79,7 @@ enum {
 #define O_CLOEXEC 02000000
 #define O_PATH 010000000
 #define RESOLVE_NO_SYMLINKS 0x04
+#define RESOLVE_IN_ROOT 0x10
 #define S_IFMT 0170000
 #define S_IFLNK 0120000
 #define S_IFREG 0100000
@@ -240,6 +241,9 @@ long copy(char* to, long size, const char* from); /* -ENAMETOOLONG if it does no
 char* format_unsigned(char* to, unsigned long value);
 /* What /proc/self/fd/@fd links to (a host path, "pipe:[...]"...), terminated; its length or -errno. */
 long fd_path(long fd, char* out, long size);
+/* Fields @fields (ascending, numbered as in proc(5): 4 is the parent) of the
+ * /proc stat file @path into @values; 1 if all were read. */
+int stat_fields(const char* path, int count, const int* fields, unsigned long* values);
 unsigned long parse_unsigned(const char** s);
 void say(const char* a, const char* b, const char* c);
 __attribute__((noreturn)) void die(const char* a, const char* b);

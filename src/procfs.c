@@ -123,26 +123,12 @@ static char* append(char* to, const char* s) {
     return to;
 }
 
-/* utime, stime and processor (fields 14, 15 and 39) of a stat file. */
+/* utime, stime and processor of a stat file. */
 static int read_thread(const char* path, unsigned long* user, unsigned long* system, unsigned long* cpu) {
-    char buf[1024];
-    long fd = sys(NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0) return 0;
-    long n = sys(NR_read, fd, buf, sizeof(buf) - 1, 0);
-    sys(NR_close, fd, 0, 0, 0);
-    if (n <= 0) return 0;
-    buf[n] = 0;
-    const char* p = 0;
-    for (long i = 0; i < n; i++)
-        if (buf[i] == ')') p = buf + i + 1; /* the name may hold ')' */
-    if (p == 0) return 0;
-    for (int field = 3; field <= 39 && *p; field++) {
-        while (*p == ' ') p++;
-        if (field == 14) *user = parse_unsigned(&p);
-        else if (field == 15) *system = parse_unsigned(&p);
-        else if (field == 39) *cpu = parse_unsigned(&p);
-        while (*p && *p != ' ') p++;
-    }
+    static const int fields[] = {14, 15, 39};
+    unsigned long values[3];
+    if (!stat_fields(path, 3, fields, values)) return 0;
+    *user = values[0], *system = values[1], *cpu = values[2];
     return 1;
 }
 

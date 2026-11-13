@@ -92,22 +92,11 @@ static void on_stop(int sig) {
 
 /* The parent of process @pid, from /proc/<pid>/stat, or -1. */
 static long parent_of(long pid) {
-    char path[48] = "/proc/", buf[512];
-    char* end = format_unsigned(path + 6, (unsigned long) pid);
-    memcpy(end, "/stat", 6);
-    long fd = sys(NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0) return -1;
-    long n = sys(NR_read, fd, buf, sizeof(buf) - 1, 0);
-    sys(NR_close, fd, 0, 0, 0);
-    if (n <= 0) return -1;
-    buf[n] = 0;
-    /* "pid (comm) state ppid ...": comm may hold anything, ")" included. */
-    long close_paren = -1;
-    for (long i = 0; i < n; i++)
-        if (buf[i] == ')') close_paren = i;
-    if (close_paren < 0 || close_paren + 4 >= n) return -1;
-    const char* p = buf + close_paren + 4;
-    return (long) parse_unsigned(&p);
+    char path[48] = "/proc/";
+    memcpy(format_unsigned(path + 6, (unsigned long) pid), "/stat", 6);
+    static const int ppid[] = {4};
+    unsigned long parent;
+    return stat_fields(path, 1, ppid, &parent) ? (long) parent : -1;
 }
 
 /* Kills every process below this one. Orphans come back to us as their

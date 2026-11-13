@@ -256,6 +256,32 @@ static long probe(const char* guest, int follow, char* host, char* resolved) {
     return r == 0 || r == -ENOENT || r == -ENOTDIR || r == -EACCES ? r : -ELOOP;
 }
 
+/* to_host() of the plain guest path @guest outside the bindings, its symlinks
+ * followed by the kernel as from the guest's root (RESOLVE_IN_ROOT): soname
+ * links, /lib -> usr/lib, icon themes. -ELOOP for the walk: a missing file
+ * (maybe one to create, or behind a binding), a result in a binding, a link
+ * written as a host path. shortcut: a link inside the rootfs directory that a
+ * binding hides (an image's own /dev/stdin) is followed; the walk would take
+ * the binding's. */
+static long in_root(const char* guest, int follow, char* host, char* resolved) {
+    long n = length_of(guest);
+    if (no_openat2 || n < 2 || guest[n - 1] == '/' || binding_of(guest, n) != 0) return -ELOOP;
+    long root = sys(NR_openat, AT_FDCWD, cfg.root, O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+    if (root < 0) return -ELOOP;
+    struct open_how how = {O_PATH | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW), 0, RESOLVE_IN_ROOT};
+    long fd = sys(NR_openat2, root, guest, &how, sizeof(how));
+    sys(NR_close, root, 0, 0, 0);
+    if (fd < 0) return -ELOOP;
+    long h = fd_path(fd, host, PATH_MAX);
+    sys(NR_close, fd, 0, 0, 0);
+    const char* g = host + cfg.root_length;
+    if (h <= cfg.root_length || memcmp(host, cfg.root, cfg.root_length) != 0 || *g != '/' ||
+        binding_of(g, h - cfg.root_length) != 0)
+        return -ELOOP;
+    memcpy(resolved, g, h - cfg.root_length + 1);
+    return 0;
+}
+
 /* Whether @rest has a ".." component: it may leave a binding (/sdcard/..)
  * or reach another (/dev/pts/../shm), which the host would not know. */
 static int has_parent(const char* rest) {
@@ -390,30 +416,13 @@ static const char* proc_root_rest(const char* p) {
 
 /* Fields 4 (parent) and 22 (start time) of /proc/<@pid>/stat, "self" for 0. */
 static int pid_stat(unsigned long pid, unsigned long* parent, unsigned long* start) {
-    char path[40] = "/proc/self", buf[1024];
+    char path[40] = "/proc/self";
     memcpy(pid ? format_unsigned(path + 6, pid) : path + 10, "/stat", 6);
-    long fd = sys(NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0) return 0;
-    long n = sys(NR_read, fd, buf, sizeof(buf) - 1, 0);
-    sys(NR_close, fd, 0, 0, 0);
-    if (n <= 0) return 0;
-    buf[n] = 0;
-    /* The name in parentheses may hold anything: the fields follow the last ")". */
-    const char* p = 0;
-    for (long i = 0; i < n; i++)
-        if (buf[i] == ')') p = buf + i;
-    if (p == 0 || n - (p - buf) < 4) return 0;
-    p += 4; /* ") S " */
-    for (int field = 4; *p != 0; field++) {
-        if (field == 4) *parent = parse_unsigned(&p);
-        if (field == 22) {
-            *start = parse_unsigned(&p);
-            return 1;
-        }
-        while (*p != 0 && *p != ' ') p++;
-        if (*p == ' ') p++;
-    }
-    return 0;
+    static const int fields[] = {4, 22}; /* the parent, the start time */
+    unsigned long values[2];
+    if (!stat_fields(path, 2, fields, values)) return 0;
+    *parent = values[0], *start = values[1];
+    return 1;
 }
 
 /* The record of a chroot()ed process, <first root>/tmp/.burrow-roots/<pid>-<start
@@ -518,6 +527,11 @@ long to_host(const char* guest, int follow, char* host, char* resolved) {
     }
     uint64_t start = stats_start();
     long r = probe(guest, follow, host, resolved);
+    if (r != -ELOOP) {
+        stats_step(STATS_PROBE, start);
+        return r;
+    }
+    r = in_root(guest, follow, host, resolved);
     if (r != -ELOOP) {
         stats_step(STATS_PROBE, start);
         return r;

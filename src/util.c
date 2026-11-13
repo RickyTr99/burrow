@@ -94,3 +94,25 @@ long fd_path(long fd, char* out, long size) {
     if (n >= 0) out[n] = 0;
     return n;
 }
+
+int stat_fields(const char* path, int count, const int* fields, unsigned long* values) {
+    char buf[1024];
+    long fd = sys(NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return 0;
+    long n = sys(NR_read, fd, buf, sizeof(buf) - 1, 0);
+    sys(NR_close, fd, 0, 0, 0);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    /* "pid (comm) state ...": comm may hold anything, ")" included. */
+    const char* p = 0;
+    for (long i = 0; i < n; i++)
+        if (buf[i] == ')') p = buf + i + 1;
+    if (p == 0) return 0;
+    int k = 0;
+    for (int field = 3; k < count && *p; field++) {
+        while (*p == ' ') p++;
+        if (field == fields[k]) values[k++] = parse_unsigned(&p);
+        while (*p && *p != ' ') p++;
+    }
+    return k == count;
+}
